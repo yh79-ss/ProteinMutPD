@@ -1,0 +1,47 @@
+# TAMU Vision (H200) profile, used for development and for testing the pipeline
+# end to end. Values come from this project's own working Slurm scripts and from
+# `sinfo` / `sacctmgr` on the Vision login node (8 x H200 per node, partition def).
+name: vision
+description: TAMU Vision cluster (8 x H200 per node). Development profile.
+
+account: null              # e.g. prj-02-mol-cell-reasoning-fm
+
+node:
+  cores: 224
+  usable_mem_gb: 1800
+
+sbatch_extra:
+  - "--qos=standard"       # sacctmgr: standard / high / low / scavenger available
+
+modules:
+  - CUDA/12.8.0
+
+login_node:
+  max_cores: 8
+  max_minutes: 60
+
+gpus:
+  h200:
+    per_node: 8
+    mem_gb: 141
+    su_per_gpu_hour: 0     # not billed per the same scheme; estimate is skipped
+    time_factor: 1.0       # reference GPU for the timing presets
+    partition: def
+    max_walltime: "2-00:00:00"   # sacctmgr QOS max wall for standard
+    max_nodes: null              # no documented per-job node cap
+
+cpu:
+  partition: def
+  max_walltime: "2-00:00:00"
+  su_per_core_hour: 0
+
+default_gpu: h200
+array_throttle: 10
+resource_rule: fixed_per_gpu
+fixed_per_gpu:
+  cpus: 8                  # matches the Slurm scripts that ran here: 1 GPU -> 8 CPUs / 64 GB,
+  mem_gb: 64               # 4 GPUs -> 32 CPUs / 256 GB
+
+storage:
+  root: "{env:MPD_HOME}"
+  file_quota_warning: null

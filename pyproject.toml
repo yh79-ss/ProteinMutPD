@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "proteinmutpd"
+version = "0.1.0.dev0"
+description = "Distill protein mutation-effect predictors into smaller students and benchmark them on ProteinGym and VenusMutHub, submitted as Slurm jobs."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "pyyaml",
+    "scipy",
+    "pandas",
+]
+
+[project.optional-dependencies]
+# Needed on the compute nodes (training / scoring). The CLI that plans and
+# submits jobs only needs the base dependencies, so it is safe on a login node.
+train = [
+    "torch",
+    "transformers>=4.51,<5",
+    "peft>=0.13",
+    "accelerate",
+    "safetensors",
+]
+test = ["pytest"]
+
+[project.urls]
+Homepage = "https://github.com/yh79-ss/ProteinMutPD"
+Issues = "https://github.com/yh79-ss/ProteinMutPD/issues"
+
+[project.scripts]
+mpd = "mpd.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+mpd = ["clusters/*.yaml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "gpu: needs a CUDA device",
+    "slow: loads a real pretrained checkpoint (needs network or a populated cache)",
+]

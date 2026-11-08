@@ -1,0 +1,93 @@
+# TAMU HPRC Grace profile.
+#
+# Sources: HPRC "Introduction to Grace" primers (2024-08-30 and Fall 2025) and the
+# HPRC AlphaFold short course (Fall 2024). The live knowledge-base pages could not
+# be fetched when this file was written, so anything marked UNVERIFIED must be
+# checked on Grace before relying on it:  sinfo, gpuavail, maxconfig -g <gpu> -G 1,
+# scontrol show partition gpu.
+name: grace
+description: TAMU HPRC Grace (Slurm). GPU nodes are A100 / A40 / RTX 6000 / T4.
+
+# Billing account. Grace charges SUs to the default account unless --account is
+# given; `myproject` lists your accounts. Pass it with `mpd ... --account 123456789012`.
+account: null
+
+# Every Grace compute node used here is a 48-core node. Usable memory is at most
+# 360 GB on the 384 GB nodes (primer, "Job Memory Requests on Grace").
+node:
+  cores: 48
+  usable_mem_gb: 360
+
+# Batch scripts HPRC shows in its own job templates.
+sbatch_extra:
+  - "--export=NONE"
+  - "--get-user-env=L"
+
+# Compute nodes only need the NVIDIA driver when torch comes from a CUDA wheel, so
+# no module is required by default. Add e.g. ["GCCcore/12.3.0"] if your env needs it.
+modules: []
+
+# Heavy work must never run on a login node (primer: no more than 8 cores, and
+# processes older than 60 minutes are killed). `mpd` only plans and submits.
+login_node:
+  max_cores: 8
+  max_minutes: 60
+
+gpus:
+  a100:
+    per_node: 2            # primer: gpu:a100:2 on 100 nodes
+    mem_gb: 40             # AlphaFold course: "A100 GPU has 40GB memory"
+    su_per_gpu_hour: 72    # AlphaFold course: SU rate per GPU a100 72
+    time_factor: 3.0      # ASSUMPTION (planning only): slowdown vs one H200; not measured
+    partition: gpu         # --gres=gpu:a100:N routes to `gpu` automatically
+    max_walltime: "4-00:00:00"   # primer sinfo: gpu 4-00:00:00, 1-32 nodes
+    max_nodes: 32
+  a40:
+    per_node: 3            # primer: gpu:a40:3 on 15 nodes
+    mem_gb: 48             # standard A40 spec (not stated by HPRC)
+    su_per_gpu_hour: 48
+    time_factor: 4.0      # ASSUMPTION (planning only): slowdown vs one H200; not measured
+    partition: gpu-a40     # primer sinfo: gpu-a40 10-00:00:00, 1-15 nodes
+    max_walltime: "10-00:00:00"
+    max_nodes: 15
+    unverified: "General-user access to gpu-a40 and its per-node memory were not confirmed."
+  rtx:
+    per_node: 2            # primer: gpu:rtx:2 on 9 nodes
+    mem_gb: 24             # standard Quadro RTX 6000 spec (not stated by HPRC)
+    su_per_gpu_hour: 48
+    time_factor: 6.0      # ASSUMPTION (planning only): slowdown vs one H200; not measured
+    partition: gpu
+    max_walltime: "4-00:00:00"
+    max_nodes: 32
+  t4:
+    per_node: 4            # primer: gpu:t4:4 on 8 nodes
+    mem_gb: 16             # standard T4 spec (not stated by HPRC)
+    su_per_gpu_hour: 24
+    time_factor: 12.0      # ASSUMPTION (planning only): slowdown vs one H200; not measured
+    partition: gpu
+    max_walltime: "4-00:00:00"
+    max_nodes: 32
+
+# CPU-only stages (data prep, evaluation). Grace routes by walltime:
+# short 2h, medium 1d, long 7d (primer sinfo).
+cpu:
+  partition: null          # let Slurm choose short/medium/long from --time
+  max_walltime: "7-00:00:00"
+  su_per_core_hour: 1      # primer: "1 SU = 1 core/hr"
+
+# Default GPU type when the user does not pass --gpu.
+default_gpu: a100
+
+# Be a good neighbour: cap how many array tasks run at once. The per-user running
+# job limit on Grace was not found in the documentation (UNVERIFIED).
+array_throttle: 8
+
+# Per-GPU share of a node, as `maxconfig -g a100 -G 1` recommends
+# (1/2 node => 24 cores, 180 GB for one A100). Other GPU types use the same rule.
+resource_rule: proportional_to_node
+
+# Where large data lives. $SCRATCH is 1 TB / 250,000 files and is not backed up;
+# $HOME is 10 GB (primer). `{env:SCRATCH}` is expanded at submit time.
+storage:
+  root: "{env:SCRATCH}/mpd"
+  file_quota_warning: 250000

@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+/build/
+/dist/
+.venv/
+# runs, downloaded data and deposit staging never belong in git (anchored: src/mpd/data is source code)
+/mpd_home/
+/runs/
+/data/
+*.part
