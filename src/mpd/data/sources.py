@@ -30,6 +30,10 @@ class Source:
     files: tuple[RemoteFile, ...]
     unpack: tuple[str, ...] = ()  # archives to extract after download
     note: str = ""
+    # A Hugging Face dataset pinned to a revision and to per-file hashes (a package-data TSV: path, size, sha256).
+    hf_repo: str | None = None
+    hf_revision: str | None = None
+    manifest: str | None = None
 
     def base_url(self) -> str:
         if not self.zenodo_record:
@@ -74,7 +78,23 @@ VENUS_STRUCTURES = Source(
     note="Needed only for structure-aware students (SaProt). ESM2 students use sequence only.",
 )
 
-SOURCES = {s.key: s for s in (PROTEINGYM, VENUS_STRUCTURES)}
+# VenusMutHub single-mutant assays at the revision the benchmark was built from. All 796 files are pinned by
+# sha256 and are byte-identical to the files of the original study.
+VENUSMUTHUB = Source(
+    key="venusmuthub",
+    title="VenusMutHub single_mutant (AI4Protein/VenusMutHub)",
+    dirname="venusmuthub-v1",
+    zenodo_record=None,
+    doi=None,
+    license="MIT",
+    files=(),
+    hf_repo="AI4Protein/VenusMutHub",
+    hf_revision="08a27d07b5764af58f99d26734d096ebe2a5f9cf",
+    manifest="venusmuthub_single_mutant.tsv",
+    note="796 small CSV files fetched one at a time (Hugging Face rate-limits bursts); labels and sequences only.",
+)
+
+SOURCES = {s.key: s for s in (PROTEINGYM, VENUSMUTHUB, VENUS_STRUCTURES)}
 
 
 def get(key: str) -> Source:

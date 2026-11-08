@@ -113,11 +113,11 @@ def cmd_status(args) -> int:
     fmt = "JobID%-18,JobName%-26,State%-12,Elapsed,ExitCode"
     out = subprocess.run(["sacct", "-X", "-n", "-j", ids, f"--format={fmt}"], capture_output=True, text=True)
     print(out.stdout.rstrip() or out.stderr.rstrip() or "(no accounting records yet)")
-    for name in ("train", "score", "eval"):
+    for name, pattern in (("teacher", "COMPLETE.json"), ("train", "COMPLETE.json"), ("score", "shard_*.json"),
+                          ("evaluate", "summary.json")):
         d = root / name
         if d.is_dir():
-            done = len(list(d.rglob("COMPLETE.json")))
-            print(f"{name:<6} COMPLETE markers: {done}")
+            print(f"{name:<9} finished: {len(list(d.rglob(pattern)))}")
     return 0
 
 

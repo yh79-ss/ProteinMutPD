@@ -39,7 +39,7 @@ mpd = "mpd.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-mpd = ["clusters/*.yaml"]
+mpd = ["clusters/*.yaml", "data/*.tsv"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

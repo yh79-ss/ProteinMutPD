@@ -6,9 +6,9 @@ You choose the teacher, the student, the training data, the evaluation data and 
 `mpd` plans the work and submits it as GPU Slurm jobs that follow the cluster's policy (TAMU Grace and Vision
 profiles are included).
 
-> **Status: alpha.** The planner, Slurm submission and data download work and are tested. The training, scoring
-> and evaluation stages that the submitted jobs call are not written yet, so `mpd submit` cannot produce
-> results today. See [Status](#status).
+> **Status: alpha.** The planner, Slurm submission, data download and the ESM2 pipeline (prepare, teacher, train,
+> score, evaluate) are written and tested on CPU with tiny models. Nothing has been run on a cluster GPU yet, and
+> SaProt is not implemented. See [Status](#status).
 
 ## Methods
 
@@ -27,6 +27,7 @@ One-assay methods take `--assay <id> [...]` and train one student per assay.
 pip install -e '.[test]'              # login node: planning and downloads need no GPU or torch
 mpd models                            # teachers and students
 mpd fetch proteingym --cluster grace  # official ProteinGym v1.3 (62 MB), checksum-verified
+mpd fetch venusmuthub --cluster grace # 796 small CSVs at a pinned revision, fetched gently (HF rate-limits bursts)
 
 mpd plan --cluster grace --account <12-digit project> \
     --teacher esm2-3b --student esm2-650m \
@@ -46,6 +47,7 @@ global batch is kept constant by adjusting gradient accumulation.
 | source | what | from |
 |---|---|---|
 | `proteingym` | ProteinGym v1.3 substitution assays, reference table, AF2 structures | official Zenodo record [10.5281/zenodo.15293562](https://doi.org/10.5281/zenodo.15293562) (MIT) |
+| `venusmuthub` | sequences and labels of the 793-assay cohort | [AI4Protein/VenusMutHub](https://huggingface.co/datasets/AI4Protein/VenusMutHub) at revision `08a27d07`, all 796 files pinned by sha256 (MIT) |
 | `venus-structures` | one structure for each of the 489 VenusMutHub proteins (CC BY 4.0) | Zenodo deposit, in preparation ([docs/ZENODO.md](docs/ZENODO.md)) |
 
 Sequence-only students (ESM2) do not need the Venus structures. Details and caveats are in
@@ -53,7 +55,7 @@ Sequence-only students (ESM2) do not need the Venus structures. Details and cave
 
 ## Models and licences
 
-Students: ESM2, SaProt. Teachers: ESM2, SaProt. Not yet available: the AIDO models.
+Students and teachers: ESM2 (8M to 3B). Planned: SaProt, AIDO.
 
 The AIDO.Protein-RAG teacher is covered by the GenBio AI Community License, whose clause 1.2.2 bars using model
 outputs for distillation except into GenBio's own models and their derivative works. `mpd` therefore blocks AIDO
@@ -66,9 +68,10 @@ The ProteinMutPD code is MIT-licensed ([LICENSE](LICENSE)). Data and models keep
 | | |
 |---|---|
 | Cluster profiles, planner, Slurm submission, `mpd fetch`, pinned data | done, tested |
-| ProteinGym / VenusMutHub loaders, label firewall | next |
-| Zero-shot scorer and evaluator (reproduce the base-model Spearman values) | next |
-| ESM2 trainer, then SaProt | planned |
+| ProteinGym and VenusMutHub loaders with a label firewall | done; Venus reproduces the earlier cohort exactly |
+| ESM2 stages (prepare, teacher, train, score, evaluate), all four methods | done, tested on CPU with tiny models |
+| Reproduce the recorded ESM2-650M base Spearman values on a GPU | next |
+| SaProt (Foldseek 3Di inputs) | planned |
 | AIDO student | planned, after the licence question is settled for each use |
 
 Nothing has been run on Grace yet. Per-user job limits, scratch purge rules, `gpu-a40` access and the CUDA module

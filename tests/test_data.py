@@ -268,3 +268,11 @@ def test_fetch_cli_reports_an_unpublished_source_as_a_normal_error(capsys, tmp_p
     monkeypatch.delenv("MPD_CLUSTER", raising=False)
     assert main(["fetch", "venus-structures", "--home", str(tmp_path)]) == 2
     assert "--from-dir" in capsys.readouterr().err
+
+
+def test_unfinished_model_families_are_rejected_before_anything_is_queued():
+    from mpd.spec import RunSpec, SpecError
+    spec = RunSpec(teacher="esm2-3b", student="saprot-650m", train_data="proteingym", method="direct-all",
+                   eval_data=("proteingym",))
+    with pytest.raises(SpecError, match="planned"):
+        spec.validate()

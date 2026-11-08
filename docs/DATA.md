@@ -23,8 +23,19 @@ Sequence-only students differ only for the 5 cropped assays.
 
 ## VenusMutHub
 
-Sequences and labels come from `AI4Protein/VenusMutHub` (MIT). The benchmark uses 489 proteins, 793 assays and
-25,044 rows. The Venus loader (not written yet) will record how these follow from the public files.
+Sequences and labels come from `AI4Protein/VenusMutHub` (MIT), directory `single_mutant`, pinned to revision
+`08a27d07` with all 796 files hashed. These files are byte-identical to the ones the original study recorded, and the
+loader reproduces its cohort exactly: 793 assays, 489 proteins, 25,044 rows, every label equal.
+
+From the 796 public files:
+
+- 3 assays on 2 proteins (1,048 and 1,267 residues) are left out; the original input curation had marked them
+  unsupported, so they have no structure. This is an explicit list, not a length cutoff: included proteins reach 1,450.
+- 2 rows with a non-numeric label (`NDA`, `1.25 ± 0.04`) are dropped.
+- 198 identity rows (`M1M`, the wild type measured) are kept.
+
+Hugging Face rate-limits bursts of requests from one address (a parallel `snapshot_download` of these files got
+HTTP 429 from a cluster node), so `mpd fetch venusmuthub` fetches one file at a time and waits out `Retry-After`.
 
 Structures for those 489 proteins are not in VenusMutHub. The structure set (159 experimental, 232 AlphaFold DB,
 98 ESMFold) is distributed as a Zenodo deposit with a manifest recording the source, version, confidence scale and
@@ -38,6 +49,14 @@ checksum of every file. The B-factor column means different things by source:
 
 Applying `value >= 70` to the ESMFold column without scaling would mask every residue.
 
+## Training contexts
+
+A context is one masked position of one sequence. Direct-logit distillation uses **dense** contexts: every residue of
+each assay's region (`MSA_start`..`MSA_end` for ProteinGym, the whole sequence for Venus), which gives the 62,671
+ProteinGym contexts of the original study. Score distillation uses **observed** contexts: the assayed positions, each
+with the mutants that were measured (37,753 positions and 592,774 variants for ProteinGym). Evaluation always scores
+the assayed positions (ProteinGym 37,753; Venus 8,945).
+
 ## Labels
 
-Labels are read only by the evaluation stage.
+Labels are read only by the evaluation stage; `tests/test_stages.py` fails if any other stage touches them.
