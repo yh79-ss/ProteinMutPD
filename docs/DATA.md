@@ -60,3 +60,23 @@ the assayed positions (ProteinGym 37,753; Venus 8,945).
 ## Labels
 
 Labels are read only by the evaluation stage; `tests/test_stages.py` fails if any other stage touches them.
+
+## Regression against the earlier study
+
+The earlier study's stored ESM2-650M base-model outputs (mutant-minus-wild-type logits at each scored position)
+were replayed through the loaders and evaluator here, with no model run:
+
+| benchmark | assay-macro Spearman, this code | recorded |
+|---|---|---|
+| VenusMutHub, 793 assays, all rows | 0.2095016689 | 0.2095016689 |
+| ProteinGym, 217 assays | 0.4279547 (float64 labels) | 0.4279488 |
+| ProteinGym with labels rounded to float32 | 0.4279487815, all 217 assays equal | 0.4279487815 |
+
+The earlier evaluator stored the labels as `float32`, which creates a few ties between close label values. This code
+keeps float64 labels, so ProteinGym macro Spearman is higher by 6e-6 (largest single assay: 1.2e-3,
+`ENVZ_ECOLI_Ghose_2023`). The ProteinGym labels themselves are identical between GenBio's archive and the official
+release for all 217 assays.
+
+Separately, running ESM2-650M on CPU (fp32) on six short assays reproduces the recorded per-assay Spearman to within
+0.003 (the earlier run used bf16 on GPU). Not yet checked against recorded numbers: the model forward pass on long
+sequences, and the five assays whose official sequence is longer than the cropped query the earlier study used.

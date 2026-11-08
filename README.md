@@ -70,7 +70,9 @@ The ProteinMutPD code is MIT-licensed ([LICENSE](LICENSE)). Data and models keep
 | Cluster profiles, planner, Slurm submission, `mpd fetch`, pinned data | done, tested |
 | ProteinGym and VenusMutHub loaders with a label firewall | done; Venus reproduces the earlier cohort exactly |
 | ESM2 stages (prepare, teacher, train, score, evaluate), all four methods | done, tested on CPU with tiny models |
-| Reproduce the recorded ESM2-650M base Spearman values on a GPU | next |
+| Recorded ESM2-650M base Spearman values (ProteinGym, Venus) | reproduced from stored model outputs; see [docs/DATA.md](docs/DATA.md) |
+| Multi-GPU (DDP) training | tested on CPU: 2 processes equal 1 process at the same global batch |
+| First real GPU run through Slurm | not done |
 | SaProt (Foldseek 3Di inputs) | planned |
 | AIDO student | planned, after the licence question is settled for each use |
 

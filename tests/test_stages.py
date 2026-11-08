@@ -140,3 +140,27 @@ def test_only_the_evaluate_stage_can_read_labels():
             assert ".labels(" in text
         else:
             assert ".labels(" not in text and "DMS_score" not in text, f"{path.name} touches labels"
+
+
+def test_two_process_ddp_training_matches_single_process(env, monkeypatch, tmp_path):
+    """Same global batch of 4: 1 process x 2 micro-batches must equal 2 processes x 1 micro-batch (gloo, CPU)."""
+    import os
+    import subprocess
+    import sys
+    # a large learning rate so the dev loss moves by far more than the tolerance below
+    single = plan_for(env, train_gpus=1, peak_lr=3e-3)
+    ddp = plan_for(env, train_gpus=2, peak_lr=3e-3)
+    assert single.resolved["world_size"] == 1 and ddp.resolved["world_size"] == 2 and ddp.resolved["accumulation"] == 1
+    run_stages(single, only={"prepare", "teacher", "train"})
+    run_stages(ddp, only={"prepare", "teacher"})
+    done = subprocess.run(
+        [sys.executable, "-m", "torch.distributed.run", "--standalone", "--nnodes=1", "--nproc_per_node=2",
+         "-m", "mpd.stages.train", "--campaign-dir", str(ddp.campaign_dir), "--stage", "train"],
+        env={**os.environ, "OMP_NUM_THREADS": "1"}, capture_output=True, text=True, timeout=600)
+    assert done.returncode == 0, done.stderr[-3000:]
+    a, b = curve(single.campaign_dir / "train" / "all"), curve(ddp.campaign_dir / "train" / "all")
+    assert [r["step"] for r in a] == [r["step"] for r in b]
+    assert abs(a[-1]["dev_loss"] - a[0]["dev_loss"]) > 100 * 2e-5, "training barely moved the loss: the comparison would be vacuous"
+    for ra, rb in zip(a, b):
+        assert ra["dev_loss"] == pytest.approx(rb["dev_loss"], abs=2e-5), (ra, rb)
+    assert (ddp.campaign_dir / "train" / "all" / "COMPLETE.json").is_file()

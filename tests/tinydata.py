@@ -21,7 +21,8 @@ def make_tiny_esm(folder: Path, seed: int) -> Path:
     tok = transformers.EsmTokenizer(str(folder / "vocab.txt"))
     cfg = transformers.EsmConfig(vocab_size=33, mask_token_id=32, pad_token_id=1, hidden_size=32, num_hidden_layers=2,
                                  num_attention_heads=2, intermediate_size=64, max_position_embeddings=1026,
-                                 position_embedding_type="rotary", token_dropout=True, emb_layer_norm_before=False)
+                                 position_embedding_type="rotary", token_dropout=True, emb_layer_norm_before=False,
+                                 hidden_dropout_prob=0.0, attention_probs_dropout_prob=0.0)   # as in the real ESM2 checkpoints
     torch.manual_seed(seed)
     transformers.EsmForMaskedLM(cfg).save_pretrained(folder)
     tok.save_pretrained(folder)
