@@ -1,0 +1,151 @@
+name: CI
+
+# GitHub-hosted runners have no GPU and no Slurm. This workflow checks the code, the packaging and the login-node
+# path (install without torch, plan, render sbatch scripts). It cannot show that a job runs on a cluster GPU.
+# It was rehearsed step by step on a Linux machine and checked with actionlint; it has not run on GitHub yet.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONDONTWRITEBYTECODE: "1"
+  # the suite builds tiny random models on the fly and must never need the network
+  HF_HUB_OFFLINE: "1"
+  TRANSFORMERS_OFFLINE: "1"
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Install ruff (same pin as the dev extra)
+        run: python -m pip install "ruff==0.17.4"
+      - name: Lint
+        run: ruff check src tests scripts
+
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            constraints/*.txt
+      - name: Install CPU-only PyTorch at the pinned version
+        run: python -m pip install -c constraints/grace.txt --extra-index-url https://download.pytorch.org/whl/cpu torch
+      - name: Install the package with the train, structure and test extras
+        run: python -m pip install -c constraints/grace.txt -c constraints/ci.txt -e ".[train,structure,test]" setuptools
+      - name: Show versions
+        run: |
+          python -c "import sys, torch, transformers, peft, numpy, scipy; print(sys.version.split()[0], 'torch', torch.__version__, 'transformers', transformers.__version__, 'peft', peft.__version__, 'numpy', numpy.__version__, 'scipy', scipy.__version__)"
+      - name: Test (CPU; no GPU, no Slurm, no network)
+        run: python -m pytest -q -ra -m "not slow and not gpu"
+
+  login-node:
+    # What a student does on a login node: install WITHOUT torch, plan, render the sbatch files.
+    # Nothing is submitted: there is no Slurm here, and `mpd submit --dry-run` only writes the scripts.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      ACCOUNT: "123456789012"   # placeholder, not a real allocation
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            constraints/*.txt
+      - name: Build the sdist and the wheel
+        env:
+          PIP_CONSTRAINT: ${{ github.workspace }}/constraints/ci.txt   # pins setuptools inside the isolated build too
+        run: |
+          python -m pip install build twine
+          python -m build
+          twine check --strict dist/*
+      - name: The wheel and the sdist carry the package data and the support files
+        run: |
+          python - <<'PY'
+          import glob, tarfile, zipfile
+          wheel = zipfile.ZipFile(glob.glob("dist/*.whl")[0]).namelist()
+          for need in ("mpd/clusters/grace.yaml", "mpd/clusters/vision.yaml", "mpd/data/models.tsv",
+                       "mpd/data/venusmuthub_single_mutant.tsv"):
+              assert need in wheel, f"missing from the wheel: {need}"
+          sdist = [n.split("/", 1)[1] for n in tarfile.open(glob.glob("dist/*.tar.gz")[0]).getnames() if "/" in n]
+          for need in ("LICENSE", "constraints/grace.txt", "scripts/setup_env.sh", "docs/DATA.md"):
+              assert need in sdist, f"missing from the sdist: {need}"
+          print("wheel:", len(wheel), "files; sdist:", len(sdist), "files")
+          PY
+      - name: Install the wheel into a clean virtual environment (no torch) and drive the CLI
+        run: |
+          python -m venv "$RUNNER_TEMP/login"
+          "$RUNNER_TEMP/login/bin/python" -m pip install -c constraints/grace.txt dist/*.whl
+          export PATH="$RUNNER_TEMP/login/bin:$PATH"
+          if python -c "import torch" 2>/dev/null; then echo "torch must not be installed in this environment"; exit 1; fi
+          mpd --version
+          mpd models
+          mpd clusters
+          # the Grace profile refuses a home under /home, and $RUNNER_TEMP is under /home on GitHub runners
+          home="$(mktemp -d /tmp/mpd-ci.XXXXXX)"
+          flags=(--cluster grace --home "$home" --account "$ACCOUNT" --teacher esm2-650m --student esm2-150m
+                 --train-data proteingym --method score-all --eval-data proteingym venusmuthub)
+          mpd plan "${flags[@]}"
+          mpd submit --dry-run "${flags[@]}"
+          scripts=("$home"/runs/*/scripts/*.sbatch)
+          for f in "${scripts[@]}"; do bash -n "$f"; done
+          grep -l -e "--account=$ACCOUNT" "${scripts[@]}"
+          if compgen -G "$home/runs/*/SUBMITTED.json" > /dev/null; then echo "a dry run left a submission marker"; exit 1; fi
+          # an empty home has no environment, data or weights, so doctor must report errors (exit 1), not crash
+          status=0
+          mpd doctor --cluster grace --home "$home" > "$RUNNER_TEMP/doctor.txt" 2>&1 || status=$?
+          cat "$RUNNER_TEMP/doctor.txt"
+          if grep -q Traceback "$RUNNER_TEMP/doctor.txt"; then echo "mpd doctor crashed"; exit 1; fi
+          test "$status" -eq 1
+
+  docs:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Install pytest
+        run: python -m pip install -c constraints/ci.txt pytest
+      - name: Relative links in README, docs and the community files resolve
+        run: python -m pytest -q -p no:cacheprovider tests/test_packaging.py -k test_docs_
+      - name: Shell scripts parse
+        run: |
+          for f in scripts/*.sh; do bash -n "$f"; done

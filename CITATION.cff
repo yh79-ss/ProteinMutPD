@@ -1,0 +1,25 @@
+cff-version: 1.2.0
+message: "If you use ProteinMutPD, please cite it with these metadata."
+title: "ProteinMutPD"
+abstract: >-
+  Distill protein mutation-effect predictors into smaller LoRA students and evaluate them on
+  ProteinGym v1.3 and VenusMutHub, planned and submitted as Slurm GPU jobs.
+type: software
+authors:
+  # TODO(owner): replace this placeholder with the real author list (family-names, given-names, optionally
+  # orcid and affiliation). Nobody has been named here on purpose. Whether the LICENSE holder should be a person
+  # or the university, and whether a public release needs clearance, are also open questions for the owner.
+  - name: "TODO: author list"
+repository-code: "https://github.com/yh79-ss/ProteinMutPD"
+url: "https://github.com/yh79-ss/ProteinMutPD"
+license: MIT
+version: "0.1.0.dev0"
+# TODO(owner): add `date-released` and `doi` when a release is tagged and archived, and a `preferred-citation`
+# block once the paper that describes the method exists.
+keywords:
+  - protein language model
+  - knowledge distillation
+  - variant effect prediction
+  - ProteinGym
+  - VenusMutHub
+  - Slurm

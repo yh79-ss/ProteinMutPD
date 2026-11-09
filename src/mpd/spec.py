@@ -104,13 +104,16 @@ class RunSpec:
             raise SpecError(f"{self.teacher} cannot be a teacher")
         if "student" not in student.roles:
             raise SpecError(f"{self.student} cannot be a student")
-        for model in (teacher, student):
-            if model.status != "available":
-                raise SpecError(f"{model.key} is {model.status} and cannot be used yet. {model.note}")
+        # A licence lock stays true after the model is implemented, so a "planned" message must not hide it.
         if teacher.output_family_lock and student.family != teacher.output_family_lock:
             raise SpecError(
                 f"{teacher.key} -> {student.key} is blocked: outputs of {teacher.key} may only be "
-                f"distilled into {teacher.output_family_lock} models. {teacher.license_note}")
+                f"distilled into {teacher.output_family_lock} models. {teacher.license_note} "
+                f"mpd has no override for this; choose a teacher without an output restriction "
+                f"(see `mpd models`). See docs/LICENSES.md.")
+        for model in (teacher, student):
+            if model.status != "available":
+                raise SpecError(f"{model.key} is {model.status} and cannot be used yet. {model.note}")
         if self.backend not in teacher.teacher_backends:
             raise SpecError(
                 f"teacher {self.teacher} supports backends {list(teacher.teacher_backends)}; "

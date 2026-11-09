@@ -65,7 +65,13 @@ PROTEINGYM = Source(
 )
 
 # Structures for the 489 VenusMutHub proteins the benchmark uses (built by scripts/maintainers/build_venus_structure_package.py).
-# Fill in zenodo_record / doi / md5 after the deposit is published; until then use `--from-dir`.
+# Fill in zenodo_record / doi / md5 after the deposit is published; until then use `--from-dir`. The deposit is in
+# preparation: do not invent a record id. Once it is published, these are the files to list (sha256 from the deposit's
+# SHA256SUMS; add the md5 Zenodo shows for each):
+#   RemoteFile("proteinmutpd-venusmuthub-structures-v1.tar.gz", 18_955_417, None,
+#              "c1331f9adf53c51cee2bb34da3548d216145ea948025e51703f67be8e9c92070")
+#   RemoteFile("structures_manifest.tsv", None, None, "e1bfb88581a9495f344f4244f3039bad0dae2daf8cffab1315d0bbf16e8633f3")
+#   RemoteFile("README.md", None, None, "bd8ede74ff44ea5148099d7f3f9937c5bceb596426f10e2b3babaa9eb90836a3")
 VENUS_STRUCTURES = Source(
     key="venus-structures",
     title="VenusMutHub structure set v1 (experimental / AlphaFold DB / ESMFold)",
@@ -102,3 +108,60 @@ def get(key: str) -> Source:
         return SOURCES[key]
     except KeyError:
         raise ValueError(f"unknown data source {key!r}; choose from {', '.join(SOURCES)}") from None
+
+
+@dataclass(frozen=True)
+class Tool:
+    """An external program fetched as a release archive, pinned by the archive's and the binary's sha256."""
+    key: str
+    title: str
+    release: str
+    commit: str
+    url: str                     # the immutable release asset
+    archive: str                 # file name of the archive
+    archive_size: int
+    archive_sha256: str
+    binary: str                  # path of the executable inside the archive
+    binary_size: int
+    binary_sha256: str
+    license: str
+    dirname: str                 # directory under <home>/tools
+    note: str = ""
+
+
+# Foldseek computes the 3Di structure alphabet SaProt reads. GPL-3.0: it is downloaded from its owners and run as a
+# separate process, never bundled (a copy in a container image, release asset or deposit would carry source and licence
+# obligations). Release 10 is pinned because it is an immutable upstream asset; the earlier study ran a rolling build of
+# 2026-09-09 (FOLDSEEK_REFERENCE_BUILD below). The 3Di encoder source and weights are unchanged between the two according
+# to the upstream commit history, but identical output has not been checked: see docs/SAPROT.md.
+FOLDSEEK = Tool(
+    key="foldseek",
+    title="Foldseek release 10-941cd33 (linux, AVX2)",
+    release="10-941cd33",
+    commit="941cd33ff0771cd2e3f144e3293e22a2b87e9fda",
+    url="https://github.com/steineggerlab/foldseek/releases/download/10-941cd33/foldseek-linux-avx2.tar.gz",
+    archive="foldseek-linux-avx2.tar.gz",
+    archive_size=11_941_946,
+    archive_sha256="e6a3e3860e76b0b7b858736f627fe680d4d7f0fc7298301d8a92b9f711d74ac7",
+    binary="foldseek/bin/foldseek",
+    binary_size=29_402_960,
+    binary_sha256="4db94a7825d409e416643772860ddf7cfe328d582679b47e6dffda7df4d41ea0",
+    license="GPL-3.0",
+    dirname="foldseek-10-941cd33",
+    note="Static x86-64 binary built for CPUs with AVX2. Run as a separate process; never bundled.",
+)
+
+# The build the earlier study's recorded SaProt numbers came from (a mutable "latest" download of 2026-09-09).
+FOLDSEEK_REFERENCE_BUILD = {
+    "version": "463739e0014a1549a527de589102cde98f802f37",
+    "binary_sha256": "56ec365f98227b07b7de4eba97aa1ae5f3cbf70fd9819311fab98eec42ada6ae",
+}
+
+TOOLS = {t.key: t for t in (FOLDSEEK,)}
+
+
+def get_tool(key: str) -> Tool:
+    try:
+        return TOOLS[key]
+    except KeyError:
+        raise ValueError(f"unknown tool {key!r}; choose from {', '.join(TOOLS)}") from None

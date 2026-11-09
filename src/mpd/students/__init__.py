@@ -11,4 +11,7 @@ def load(key: str, device, *, lora=None, adapter=None, dtype=None):
     if family == "esm2":
         from .esm2 import Esm2
         return Esm2(key, device, dtype, lora=lora, adapter=adapter)
+    if family == "saprot":
+        from .saprot import Saprot
+        return Saprot(key, device, dtype, lora=lora, adapter=adapter)
     raise NotImplementedError(f"no implementation for model family {family!r} yet")

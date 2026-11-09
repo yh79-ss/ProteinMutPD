@@ -1,7 +1,6 @@
 """The five stages end to end on CPU: tiny random ESM2 models, a miniature ProteinGym-format dataset."""
 
 import csv
-import importlib
 import json
 from pathlib import Path
 
@@ -12,45 +11,9 @@ pytest.importorskip("torch")
 pytest.importorskip("transformers")
 pytest.importorskip("peft")
 
-from mpd.slurm.cluster import Cluster
-from mpd.slurm.plan import PlanOptions, make_plan
-from mpd.slurm.submit import write_campaign
-from mpd.spec import RunSpec
+from fx_stages import curve, env, finish_ddp_train, plan_for, run_stages, start_ddp_train  # noqa: F401
 
 STAGES_DIR = Path(__file__).resolve().parents[1] / "src" / "mpd" / "stages"
-
-
-@pytest.fixture
-def env(monkeypatch, tiny_home, tiny_models):
-    monkeypatch.setenv("MPD_HOME", str(tiny_home))
-    monkeypatch.setenv("MPD_DTYPE", "float32")
-    monkeypatch.setenv("MPD_MODEL_ESM2_8M", str(tiny_models["student"]))
-    monkeypatch.setenv("MPD_MODEL_ESM2_35M", str(tiny_models["teacher"]))
-    return tiny_home
-
-
-def plan_for(home, **kw):
-    kw = {"method": "direct-all", "updates": 6, "global_batch": 4, "dev_fraction": 0.3, **kw}
-    if kw["method"].endswith("all"):
-        kw.setdefault("train_gpus", 1)
-    spec = RunSpec(teacher="esm2-35m", student="esm2-8m", train_data="proteingym", eval_data=("proteingym",), **kw)
-    plan = make_plan(spec, PlanOptions(cluster=Cluster.load("vision"), home=home, python="python",
-                                       score_shards={"proteingym": 2}))
-    write_campaign(plan)
-    return plan
-
-
-def run_stages(plan, only=None):
-    for stage in plan.stages:
-        if only and stage.name not in only:
-            continue
-        module = importlib.import_module(stage.module)
-        for i in range(len(stage.tasks)):
-            module.main(["--campaign-dir", str(plan.campaign_dir), "--stage", stage.name, "--task-index", str(i + stage.task_offset)])
-
-
-def curve(path):
-    return [json.loads(line) for line in open(path / "dev_curve.jsonl")]
 
 
 def test_direct_logit_pipeline_all_assays(env):
@@ -110,8 +73,11 @@ def test_a_teacher_identical_to_the_student_starts_at_zero_loss(env, monkeypatch
     plan = plan_for(env, method=method)
     run_stages(plan, only={"prepare", "teacher", "train"})
     start = curve(plan.campaign_dir / "train" / "all")[0]
-    assert start["step"] == 0 and start["dev_loss"] < 1e-8
-    assert start["dev_rho_ST"] > 0.999999
+    # Same weights, so only float32 noise separates teacher and student (the two stages batch and pad differently). The
+    # noise depends on the torch release: exactly zero on the pinned 2.10, a few 1e-8 on newer ones. A wrong index, window
+    # or amino-acid order gives a loss around 1e-1 and a rank correlation near 0, far outside these bounds.
+    assert start["step"] == 0 and start["dev_loss"] < 1e-6
+    assert start["dev_rho_ST"] > 0.9999
 
 
 def test_stages_are_idempotent(env, capsys):
@@ -142,22 +108,20 @@ def test_only_the_evaluate_stage_can_read_labels():
             assert ".labels(" not in text and "DMS_score" not in text, f"{path.name} touches labels"
 
 
-def test_two_process_ddp_training_matches_single_process(env, monkeypatch, tmp_path):
-    """Same global batch of 4: 1 process x 2 micro-batches must equal 2 processes x 1 micro-batch (gloo, CPU)."""
-    import os
-    import subprocess
-    import sys
+def test_two_process_ddp_training_matches_single_process(env, tmp_path):
+    """Same global batch of 8: 1 process x 4 micro-batches must equal 2 processes x 2 micro-batches (gloo, CPU).
+
+    Two micro-batches per process take the no_sync branch of the accumulation loop, which real multi-GPU runs rely on.
+    """
     # a large learning rate so the dev loss moves by far more than the tolerance below
-    single = plan_for(env, train_gpus=1, peak_lr=3e-3)
-    ddp = plan_for(env, train_gpus=2, peak_lr=3e-3)
-    assert single.resolved["world_size"] == 1 and ddp.resolved["world_size"] == 2 and ddp.resolved["accumulation"] == 1
+    single = plan_for(env, train_gpus=1, peak_lr=3e-3, global_batch=8)
+    ddp = plan_for(env, train_gpus=2, peak_lr=3e-3, global_batch=8)
+    assert single.resolved["world_size"] == 1 and single.resolved["accumulation"] == 4
+    assert ddp.resolved["world_size"] == 2 and ddp.resolved["accumulation"] == 2
     run_stages(single, only={"prepare", "teacher", "train"})
     run_stages(ddp, only={"prepare", "teacher"})
-    done = subprocess.run(
-        [sys.executable, "-m", "torch.distributed.run", "--standalone", "--nnodes=1", "--nproc_per_node=2",
-         "-m", "mpd.stages.train", "--campaign-dir", str(ddp.campaign_dir), "--stage", "train"],
-        env={**os.environ, "OMP_NUM_THREADS": "1"}, capture_output=True, text=True, timeout=600)
-    assert done.returncode == 0, done.stderr[-3000:]
+    code, log = finish_ddp_train(start_ddp_train(ddp, tmp_path, "ddp"))
+    assert code == 0, log[-3000:]
     a, b = curve(single.campaign_dir / "train" / "all"), curve(ddp.campaign_dir / "train" / "all")
     assert [r["step"] for r in a] == [r["step"] for r in b]
     assert abs(a[-1]["dev_loss"] - a[0]["dev_loss"]) > 100 * 2e-5, "training barely moved the loss: the comparison would be vacuous"

@@ -1,0 +1,9 @@
+# Extra pins for CI and for contributors. Combine with grace.txt:
+#   python -m pip install -c constraints/grace.txt -c constraints/ci.txt -e '.[train,structure,test]'
+# CI installs CPU torch first, from the PyTorch CPU index; `torch==2.10.0` in grace.txt matches its `2.10.0+cpu`:
+#   python -m pip install -c constraints/grace.txt --extra-index-url https://download.pytorch.org/whl/cpu torch
+# These are the versions the workflow was rehearsed with on a Linux machine; it has not run on GitHub yet.
+pytest==9.0.2
+setuptools==82.0.0   # builds the wheel in tests/test_packaging.py and, through PIP_CONSTRAINT, in CI's isolated build
+build==1.6.1
+twine==7.0.0

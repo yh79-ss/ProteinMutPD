@@ -1,0 +1,68 @@
+name: Bug report
+description: Something in mpd (plan, submit, fetch, doctor, a stage) does not do what the documentation says.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Run `mpd doctor` first and read its [FAIL] lines: most problems are a missing environment, data or weights, and it prints the command that fixes each.
+        **Never paste a Slurm account number, a token, a password, a private key or your user name.** Replace an account number with `<ACCOUNT>` and a user name with `<netid>`. `mpd doctor --report` is meant to be safe to paste; read it before you post it anyway.
+  - type: input
+    id: version
+    attributes:
+      label: mpd version
+      description: The output of `mpd --version`.
+      placeholder: "mpd 0.1.0.dev0"
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Output of `mpd doctor --report`
+      description: Run it on the machine where the problem happened (the login node, if you submit from there).
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: The command line you ran
+      description: The full `mpd ...` line, with the account number replaced by `<ACCOUNT>`.
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: campaign
+    attributes:
+      label: Campaign id
+      description: The folder name under `<home>/runs/` (the first line of `mpd plan` shows it). Leave empty if the problem happened before any campaign existed.
+  - type: textarea
+    id: output
+    attributes:
+      label: What happened
+      description: The error text. For a job that failed, add the last lines of its `.err` and `.out` files (`mpd logs CAMPAIGN STAGE --err --tail 40`).
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where did it run?
+      options:
+        - TAMU Grace
+        - TAMU Vision
+        - Another Slurm cluster (custom profile)
+        - Laptop or workstation, no Slurm
+    validations:
+      required: true
+  - type: checkboxes
+    id: redacted
+    attributes:
+      label: Before you submit
+      options:
+        - label: I removed account numbers, tokens, keys, user names and private paths from everything above.
+          required: true

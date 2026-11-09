@@ -5,7 +5,7 @@ Reads assay sequences and which mutants were measured, never the scores.
 
 from __future__ import annotations
 
-from ..contexts import ContextTable, build_table, locate, union
+from ..contexts import build_table, locate, union
 from .common import Campaign, stage_main, write_json
 
 

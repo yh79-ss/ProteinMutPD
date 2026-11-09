@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import email.utils
+import errno
 import hashlib
+import http.client
 import json
 import shutil
 import time
@@ -17,9 +20,27 @@ from typing import Callable
 from . import venus_structures as vs
 from .sources import ZENODO_FILES, RemoteFile, Source
 
+CHUNK = 1 << 20
+
 
 class FetchError(RuntimeError):
     pass
+
+
+class DownloadError(FetchError):
+    """A transfer that failed. `code` is the HTTP status the server answered with, if it answered."""
+
+    def __init__(self, message: str, code: int | None = None):
+        super().__init__(message)
+        self.code = code
+
+
+class NetworkError(DownloadError):
+    """Connection trouble, or a server that kept failing: usually no route to the host."""
+
+
+class TimeBudgetReached(FetchError):
+    """The caller's deadline passed. Partial downloads are kept, so running the same command resumes them."""
 
 
 def _digest(path: Path, algo: str) -> str:
@@ -46,25 +67,154 @@ def _url(base: str, name: str) -> str:
     return url + "?download=1" if "zenodo.org" in base else url
 
 
+def _user_agent() -> str:
+    from .. import __version__
+    return f"proteinmutpd/{__version__}"
+
+
+def _request(url: str, headers: dict[str, str] | None = None) -> urllib.request.Request:
+    return urllib.request.Request(url, headers={"User-Agent": _user_agent(), **(headers or {})})
+
+
+def _retry_after(headers, default: float) -> float:
+    """Seconds to back off: the server's Retry-After (seconds or an HTTP date), else `default`; at most 3 minutes."""
+    raw = headers.get("Retry-After") if headers is not None else None
+    wait = 0.0
+    if raw:
+        try:
+            wait = float(raw)
+        except ValueError:
+            try:
+                wait = email.utils.parsedate_to_datetime(raw).timestamp() - time.time()
+            except (TypeError, ValueError):
+                pass
+    return min(wait if wait > 0 else default, 180)
+
+
+def _disk_full(exc: Exception) -> bool:
+    return isinstance(exc, OSError) and exc.errno in (errno.ENOSPC, errno.EDQUOT)
+
+
+def _disk_full_error(path: Path) -> DownloadError:
+    return DownloadError(f"disk full or quota exceeded while writing {path} (Grace: run `showquota`, "
+                         "and keep --home on $SCRATCH)")
+
+
+def _check_deadline(deadline: float | None) -> None:
+    if deadline is not None and time.monotonic() >= deadline:
+        raise TimeBudgetReached("stopped at the time limit; partial downloads are kept")
+
+
+def _pause(seconds: float, deadline: float | None) -> None:
+    if deadline is not None and time.monotonic() + seconds >= deadline:
+        raise TimeBudgetReached("stopped at the time limit while waiting to retry; partial downloads are kept")
+    time.sleep(seconds)
+
+
+def _copy(resp, out, done: int, size: int | None, deadline: float | None,
+          progress: Callable[[int], None] | None) -> None:
+    while True:
+        block = resp.read(CHUNK)
+        if not block:
+            return
+        out.write(block)
+        done += len(block)
+        if progress:
+            progress(done)
+        if deadline is not None and time.monotonic() >= deadline and done != size:
+            raise TimeBudgetReached("stopped at the time limit; partial downloads are kept")
+
+
 def _download(url: str, target: Path, *, retries: int = 3, timeout: int = 60,
-              log: Callable[[str], None] = print) -> None:
+              log: Callable[[str], None] = print, resume: bool = False, size: int | None = None,
+              deadline: float | None = None, progress: Callable[[int], None] | None = None) -> None:
+    """Fetch `url` to `target` through `<target>.part`.
+
+    By default any failure deletes the `.part` and the next attempt starts from byte 0. With `resume=True` the
+    `.part` is kept and continued with an HTTP Range request, so a connection that dies after 9 GB loses
+    nothing; `retries` then counts consecutive attempts that brought no new bytes. `size` (the pinned size) makes
+    a short body detectable, `deadline` is a `time.monotonic()` value after which TimeBudgetReached is raised,
+    and `progress(bytes_on_disk)` is called after every chunk.
+    """
+    if resume:
+        return _download_resumable(url, target, size=size, retries=retries, timeout=timeout, log=log,
+                                   deadline=deadline, progress=progress)
     part = target.with_name(target.name + ".part")
     for attempt in range(1, retries + 1):
         try:
-            with urllib.request.urlopen(url, timeout=timeout) as resp, open(part, "wb") as out:
-                shutil.copyfileobj(resp, out, 1 << 20)
+            with urllib.request.urlopen(_request(url), timeout=timeout) as resp, open(part, "wb") as out:
+                shutil.copyfileobj(resp, out, CHUNK)
             part.replace(target)
             return
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
             part.unlink(missing_ok=True)
+            if _disk_full(exc):
+                raise _disk_full_error(part) from exc
             if attempt == retries:
-                raise FetchError(f"could not download {url}: {exc}") from exc
+                raise NetworkError(f"could not download {url}: {exc}", getattr(exc, "code", None)) from exc
             wait = 2 * attempt
             if isinstance(exc, urllib.error.HTTPError) and exc.code in (429, 503):
                 # rate limited: Hugging Face and Zenodo both ask clients to back off
-                wait = min(int(exc.headers.get("Retry-After") or 0) or 20 * attempt, 180)
-            log(f"  retry {attempt}/{retries - 1} in {wait}s after: {exc}")
+                wait = _retry_after(exc.headers, 20 * attempt)
+            log(f"  retry {attempt}/{retries - 1} in {wait:g}s after: {exc}")
             time.sleep(wait)
+
+
+def _download_resumable(url: str, target: Path, *, size: int | None, retries: int, timeout: int,
+                        log: Callable[[str], None], deadline: float | None,
+                        progress: Callable[[int], None] | None) -> None:
+    part = target.with_name(target.name + ".part")
+    failures = 0                                  # consecutive attempts that brought no new bytes
+    for _ in range(retries * 20):                 # ceiling on requests per file, whatever the progress
+        have = part.stat().st_size if part.exists() else 0
+        if size is not None and have > size:
+            part.unlink()                         # cannot be a prefix of this file
+            have = 0
+        if size is not None and have == size:
+            break
+        _check_deadline(deadline)
+        floor, error, wait = have, None, 0.0
+        try:
+            with urllib.request.urlopen(_request(url, {"Range": f"bytes={have}-"} if have else None),
+                                        timeout=timeout) as resp:
+                if have and resp.status == 206:
+                    if not (resp.headers.get("Content-Range") or "").startswith(f"bytes {have}-"):
+                        part.unlink(missing_ok=True)
+                        raise DownloadError(f"{url}: the server answered a Range request with "
+                                            f"{resp.headers.get('Content-Range')!r}; discarded the partial file")
+                    mode = "ab"
+                else:
+                    mode, floor = "wb", 0         # first request, or the server ignored Range: start over
+                with open(part, mode) as out:
+                    _copy(resp, out, floor, size, deadline, progress)
+        except urllib.error.HTTPError as exc:
+            exc.close()
+            error, wait = exc, 2 * (failures + 1)
+            if exc.code == 416:                   # the Range starts at or past the end of the file
+                if size is None:
+                    break                         # the .part already is the whole file
+                part.unlink(missing_ok=True)      # our prefix does not fit what the server has
+            elif exc.code in (429, 503):
+                wait = _retry_after(exc.headers, 20 * (failures + 1))
+            elif exc.code not in (408, 500, 502, 504):
+                raise DownloadError(f"could not download {url}: HTTP {exc.code} {exc.reason}", exc.code) from exc
+        except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
+            if _disk_full(exc):
+                raise _disk_full_error(part) from exc
+            error, wait = exc, 2 * (failures + 1)
+        now = part.stat().st_size if part.exists() else 0
+        if error is None and (size is None or now == size):
+            break
+        failures = failures + 1 if now <= floor else 0
+        if failures >= retries:
+            why = error if error is not None else f"the server ended the body after {now} of {size} bytes"
+            raise NetworkError(f"could not download {url}: {why}", getattr(error, "code", None)) from error
+        if error is not None:
+            log(f"  retry in {wait:g}s after: {error}")
+            _pause(wait, deadline)
+    if not part.exists() or (size is not None and part.stat().st_size != size):
+        raise NetworkError(f"{target.name}: incomplete download; the partial file is kept, run the command again")
+    part.replace(target)
 
 
 def _obtain(spec: RemoteFile, dest: Path, *, base_url: str | None, from_dir: Path | None,

@@ -1,4 +1,3 @@
-import json
 import math
 
 import numpy as np
@@ -93,6 +92,7 @@ def test_dev_split_is_by_position_and_deterministic(bm):
 # -- recipe pieces -------------------------------------------------------------------
 
 def test_learning_rate_schedule_matches_the_recipe():
+    pytest.importorskip("torch")
     from mpd.stages.train import learning_rate
     total, peak = 2103, 3e-5
     assert learning_rate(1, total, peak) < peak / 50
@@ -103,12 +103,14 @@ def test_learning_rate_schedule_matches_the_recipe():
 
 
 def test_monitor_steps_reproduce_the_paper_checkpoints():
+    pytest.importorskip("torch")
     from mpd.stages.train import monitor_steps
     assert monitor_steps(2103) == [701, 1402, 2103]
     assert monitor_steps(2) == [1, 2]
 
 
 def test_update_stream_is_deterministic_and_covers_training_rows():
+    pytest.importorskip("torch")
     from mpd.stages.train import update_stream
     rows = np.arange(100, 130)
     a, b = update_stream(rows, 7, 8, seed=3), update_stream(rows, 7, 8, seed=3)
@@ -119,6 +121,7 @@ def test_update_stream_is_deterministic_and_covers_training_rows():
 
 
 def test_checkpoint_selection_prefers_improvement_and_early_steps():
+    pytest.importorskip("torch")
     from mpd.stages.train import select_checkpoint
     curve = [{"step": 0, "dev_loss": 1.0}, {"step": 10, "dev_loss": 0.8}, {"step": 20, "dev_loss": 0.8}, {"step": 30, "dev_loss": 0.9}]
     best = select_checkpoint(curve)
@@ -176,6 +179,7 @@ def test_direct_loss_is_zero_for_identical_logits_and_positive_otherwise():
 
 
 def test_flatten_variants_lists_the_observed_mutants_of_a_batch(bm):
+    pytest.importorskip("torch")
     from mpd.objectives import flatten_variants
     t = build_table(bm, ["ASSAY_B"])
     row, mt = flatten_variants(t.var_ptr, t.var_mt, np.array([2, 5]))

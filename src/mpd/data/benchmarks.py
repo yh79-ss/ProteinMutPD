@@ -26,6 +26,8 @@ class Assay:
     structure: Path | None = None
     structure_scale: str | None = None   # meaning of the B-factor column: see data.venus_structures.SCALE_TO_PERCENT
     region: tuple[int, int] | None = None  # 0-based [start, end) of the assayed region; None = the whole sequence
+    structure_span: tuple[int, int] | None = None   # 0-based [start, end) of the sequence the structure covers; None = all of it
+    structure_chain: str | None = None   # chain to read when the structure file has several; None = its only chain
 
     def span(self) -> tuple[int, int]:
         return self.region or (0, len(self.sequence))
@@ -86,10 +88,30 @@ def build_variants(mutants: list[str], sequence: str, offset: int = 1) -> tuple[
                     np.asarray(wt, dtype=np.uint8), np.asarray(mt, dtype=np.uint8)), keep
 
 
+_PDB_RANGE = re.compile(r"^\s*(\d+)\s*-\s*(\d+)\s*$")
+
+
+def pdb_span(assay_id: str, pdb_range: str, seq_len: int) -> tuple[int, int] | None:
+    """ProteinGym's `pdb_range` ("a-b", 1-based inclusive over `target_seq`) as a 0-based half-open span clipped to the
+    sequence (one structure is longer than its assay's sequence). Empty means the whole sequence."""
+    text = (pdb_range or "").strip()
+    if not text:
+        return None
+    match = _PDB_RANGE.match(text)
+    if not match:
+        raise ValueError(f"{assay_id}: pdb_range {text!r} is not of the form 'a-b'")
+    a, b = int(match.group(1)), int(match.group(2))
+    if not 1 <= a <= b or a > seq_len:
+        raise ValueError(f"{assay_id}: pdb_range {text} does not fit the {seq_len}-residue sequence")
+    return a - 1, min(b, seq_len)
+
+
 class ProteinGym(Benchmark):
     """ProteinGym v1.3 substitutions as unpacked by `mpd fetch proteingym`.
 
-    Mutations index the full `target_seq` 1-based in every assay (docs/DATA.md).
+    Mutations index the full `target_seq` 1-based in every assay (docs/DATA.md). Structures are the official AF2 models
+    (pLDDT 0-100 in the B-factor column); `pdb_range` gives the part of `target_seq` a model covers. An entry that
+    lists several structures (`|` in `pdb_file` or `pdb_range`, absent from v1.3) gets no structure.
     """
     name = "proteingym"
 
@@ -105,11 +127,16 @@ class ProteinGym(Benchmark):
     def assays(self) -> list[Assay]:
         if self._assays is None:
             structures = self.root / "ProteinGym_AF2_structures"
-            self._assays = [
-                Assay(assay_id=k, protein_id=r["UniProt_ID"], sequence=r["target_seq"],
-                      structure=structures / r["pdb_file"] if r.get("pdb_file") else None,
-                      region=(int(r["MSA_start"]) - 1, int(r["MSA_end"])) if r.get("MSA_start") else None)
-                for k, r in sorted(self._ref.items())]
+            self._assays = []
+            for k, r in sorted(self._ref.items()):
+                pdb_file = (r.get("pdb_file") or "").strip()
+                single = bool(pdb_file) and "|" not in pdb_file and "|" not in (r.get("pdb_range") or "")
+                self._assays.append(Assay(
+                    assay_id=k, protein_id=r["UniProt_ID"], sequence=r["target_seq"],
+                    structure=structures / pdb_file if single else None,
+                    structure_scale="percent_0_to_100" if single else None,
+                    region=(int(r["MSA_start"]) - 1, int(r["MSA_end"])) if r.get("MSA_start") else None,
+                    structure_span=pdb_span(k, r.get("pdb_range", ""), len(r["target_seq"])) if single else None))
         return self._assays
 
     def _read(self, assay_id: str, score: bool) -> tuple[list[str], list[float]]:
@@ -144,4 +171,4 @@ def open_benchmark(name: str, home: Path) -> Benchmark:
     raise ValueError(f"unknown benchmark {name!r}")
 
 
-__all__ = ["AA20", "Assay", "Benchmark", "ProteinGym", "Variants", "build_variants", "open_benchmark"]
+__all__ = ["AA20", "Assay", "Benchmark", "ProteinGym", "Variants", "build_variants", "open_benchmark", "pdb_span"]

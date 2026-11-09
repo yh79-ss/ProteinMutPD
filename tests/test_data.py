@@ -1,4 +1,6 @@
+import errno
 import hashlib
+import http.client
 import importlib.util
 import io
 import json
@@ -10,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from mpd.cli import main
-from mpd.data import sources, venus_structures as vs
+from mpd.data import fetch as fetch_mod, sources, venus_structures as vs
 from mpd.data.fetch import FetchError, fetch_source
 
 BUILDER = Path(__file__).resolve().parents[1] / "scripts" / "maintainers" / "build_venus_structure_package.py"
@@ -101,6 +103,46 @@ def test_fetch_from_local_dir(tmp_path, served):
     assert (tmp_path / "out" / "pkg" / "x.csv").is_file()
     with pytest.raises(FetchError, match="not found"):
         fetch_source(src, tmp_path / "out2", from_dir=tmp_path / "empty", log=lambda _m: None)
+
+
+def test_a_body_cut_short_by_the_server_is_retried_not_a_traceback(tmp_path, monkeypatch):
+    sleeps = []
+
+    class Cut(io.BytesIO):
+        def read(self, *args):
+            raise http.client.IncompleteRead(b"par", 10)
+
+    answers = iter([Cut(), io.BytesIO(b"payload")])
+    monkeypatch.setattr(fetch_mod.urllib.request, "urlopen", lambda request, timeout=0: next(answers))
+    monkeypatch.setattr(fetch_mod.time, "sleep", sleeps.append)
+    target = tmp_path / "f.bin"
+    fetch_mod._download("https://example.org/f", target, retries=3, log=lambda _m: None)
+    assert target.read_bytes() == b"payload" and sleeps == [2] and not (tmp_path / "f.bin.part").exists()
+
+
+def test_a_full_disk_is_named_as_such_and_not_retried(tmp_path, monkeypatch):
+    def full(*args):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(fetch_mod.urllib.request, "urlopen", lambda request, timeout=0: io.BytesIO(b"x"))
+    monkeypatch.setattr(fetch_mod.shutil, "copyfileobj", full)
+    monkeypatch.setattr(fetch_mod.time, "sleep", lambda s: pytest.fail("a full disk is not worth retrying"))
+    with pytest.raises(FetchError, match=r"disk full or quota exceeded while writing .*f\.bin\.part.*showquota"):
+        fetch_mod._download("https://example.org/f", tmp_path / "f.bin", retries=3, log=lambda _m: None)
+    assert not (tmp_path / "f.bin.part").exists()
+
+
+def test_downloads_identify_themselves(tmp_path, monkeypatch):
+    seen = []
+
+    def record(request, timeout=0):
+        seen.append(request)
+        return io.BytesIO(b"x")
+
+    monkeypatch.setattr(fetch_mod.urllib.request, "urlopen", record)
+    fetch_mod._download("https://example.org/f", tmp_path / "f.bin", log=lambda _m: None)
+    assert seen[0].full_url == "https://example.org/f" and seen[0].get_header("User-agent").startswith("proteinmutpd/")
+    assert not seen[0].has_header("Authorization")
 
 
 def test_zip_with_path_traversal_is_refused(tmp_path):
@@ -272,7 +314,7 @@ def test_fetch_cli_reports_an_unpublished_source_as_a_normal_error(capsys, tmp_p
 
 def test_unfinished_model_families_are_rejected_before_anything_is_queued():
     from mpd.spec import RunSpec, SpecError
-    spec = RunSpec(teacher="esm2-3b", student="saprot-650m", train_data="proteingym", method="direct-all",
+    spec = RunSpec(teacher="esm2-3b", student="aido-rag-16b", train_data="proteingym", method="direct-all",
                    eval_data=("proteingym",))
     with pytest.raises(SpecError, match="planned"):
         spec.validate()

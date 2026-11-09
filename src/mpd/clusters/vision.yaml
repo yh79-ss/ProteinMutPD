@@ -1,10 +1,11 @@
-# TAMU Vision (H200) profile, used for development and for testing the pipeline
-# end to end. Values come from this project's own working Slurm scripts and from
-# `sinfo` / `sacctmgr` on the Vision login node (8 x H200 per node, partition def).
+# TAMU Vision (H200) profile, used for development and for testing the pipeline end to end. Values come from working Slurm
+# scripts and from `sinfo` / `sacctmgr` / `sbatch --test-only` on the Vision login node (8 x H200 per node, partition def, Slurm 25.05).
+# Verified there with `sbatch --test-only`: the GRES type is case sensitive (--gres=gpu:H200:1 is accepted, gpu:h200:1 is rejected)
+# and every directive mpd writes is accepted. Nothing is billed per SU on this profile, so the plan's SU figures are zero.
 name: vision
 description: TAMU Vision cluster (8 x H200 per node). Development profile.
 
-account: null              # e.g. prj-02-mol-cell-reasoning-fm
+account: null
 
 node:
   cores: 224
@@ -22,6 +23,7 @@ login_node:
 
 gpus:
   h200:
+    gres: H200             # the type is spelled this way in `sinfo -o %G` and is case sensitive
     per_node: 8
     mem_gb: 141
     su_per_gpu_hour: 0     # not billed per the same scheme; estimate is skipped
@@ -34,6 +36,9 @@ cpu:
   partition: def
   max_walltime: "2-00:00:00"
   su_per_core_hour: 0
+  # Vision prints "Jobs without a GPU request will soon be rejected" for the CPU stages (prepare, evaluate). Uncomment to give
+  # them a GPU request; they then reserve one GPU each for their (short) run.
+  # gres: "gpu:1"
 
 default_gpu: h200
 array_throttle: 10

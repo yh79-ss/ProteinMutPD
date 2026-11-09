@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -11,22 +12,43 @@ import torch
 from .. import registry
 from ..constants import AA20
 from ..contexts import ContextTable
+from ..data import models
 
 LORA_TARGETS = ["query", "key", "value", "attention.output.dense"]
 MAX_TOKENS = 1024
+_warned_bf16 = False
 
 
 def model_path(key: str) -> str:
-    """`MPD_MODEL_<KEY>` (e.g. MPD_MODEL_ESM2_650M) overrides the Hugging Face id with a local folder."""
-    override = os.environ.get("MPD_MODEL_" + key.upper().replace("-", "_"))
-    return override or registry.get(key).hf_id
+    """Folder to load `key` from: `MPD_MODEL_<KEY>` (e.g. MPD_MODEL_ESM2_650M), else the copy `mpd fetch model` made.
+
+    Never the Hugging Face id, because jobs are offline (see `mpd.data.models.resolve`).
+    """
+    return models.resolve(key)
+
+
+def _native_bf16() -> bool:
+    try:
+        return torch.cuda.is_bf16_supported(including_emulation=False)
+    except TypeError:                     # older torch: no such argument
+        return torch.cuda.is_bf16_supported()
 
 
 def default_dtype() -> torch.dtype:
+    """bfloat16 on a GPU with native support, float32 otherwise; `MPD_DTYPE` overrides both."""
+    global _warned_bf16
     name = os.environ.get("MPD_DTYPE")
     if name:
         return getattr(torch, name)
-    return torch.bfloat16 if torch.cuda.is_available() else torch.float32
+    if not torch.cuda.is_available():
+        return torch.float32
+    if not _native_bf16():
+        if not _warned_bf16:              # Turing GPUs (T4, RTX 6000) only emulate bf16, slowly
+            _warned_bf16 = True
+            warnings.warn("this GPU has no native bfloat16 (compute capability below 8.0); using float32, which is "
+                          "slower and needs more memory. Set MPD_DTYPE to choose a dtype yourself.", RuntimeWarning)
+        return torch.float32
+    return torch.bfloat16
 
 
 def optimal_window(token_ids: list[int], residue_pos: int, max_tokens: int = MAX_TOKENS) -> tuple[list[int], int]:
@@ -56,10 +78,15 @@ class Esm2:
                  lora: dict | None = None, adapter: Path | None = None):
         from transformers import AutoModelForMaskedLM, AutoTokenizer
         self.key, self.device = key, device
+        info = registry.get(key)
         path = model_path(key)
-        self.tokenizer = AutoTokenizer.from_pretrained(path)
+        hub = {"revision": info.revision} if path == info.hf_id and info.revision else {}   # only the opt-in Hub route
+        self.tokenizer = AutoTokenizer.from_pretrained(path, **hub)
         model = AutoModelForMaskedLM.from_pretrained(path, torch_dtype=dtype or default_dtype(),
-                                                     attn_implementation="eager")
+                                                     attn_implementation="eager", **hub)
+        # PEFT copies the base model's name into every saved adapter (adapter_config.json and README.md); from a
+        # local folder that would be an absolute path, so name the model by its Hub id instead.
+        model.name_or_path = model.config.name_or_path = info.hf_id
         if lora is not None and adapter is not None:
             raise ValueError("pass either lora (to train) or adapter (to load a trained one)")
         if lora is not None:
@@ -67,6 +94,8 @@ class Esm2:
             model = get_peft_model(model, LoraConfig(r=lora["rank"], lora_alpha=lora["alpha"], lora_dropout=0.0,
                                                      bias="none", target_modules=LORA_TARGETS,
                                                      task_type="FEATURE_EXTRACTION"))
+            if models.override_path(key) is None:        # an override folder is the user's own weights, not the pin
+                model.peft_config["default"].revision = info.revision
         elif adapter is not None:
             from peft import PeftModel
             model = PeftModel.from_pretrained(model, adapter, is_trainable=False)
@@ -81,7 +110,9 @@ class Esm2:
         return [p for p in self.module.parameters() if p.requires_grad]
 
     def save_adapter(self, path: Path) -> None:
-        self.module.save_pretrained(path, safe_serialization=True)
+        # LoRA on the attention projections never changes the vocabulary. Saying so skips PEFT's "auto" check, which
+        # now that the base model is named by its Hub id would ask huggingface.co for its config.json.
+        self.module.save_pretrained(path, safe_serialization=True, save_embedding_layers=False)
 
     def encode(self, table: ContextTable, structures=None) -> None:
         self._tokens = [self.tokenizer.encode(s, add_special_tokens=True) for s in table.sequences]

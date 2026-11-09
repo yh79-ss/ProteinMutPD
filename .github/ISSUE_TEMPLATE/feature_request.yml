@@ -1,0 +1,15 @@
+name: Feature request
+description: A new teacher or student model, a cluster profile, a benchmark, or a method.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What do you need, and why
+    validations:
+      required: true
+  - type: textarea
+    id: licence
+    attributes:
+      label: Licence of any model or data involved
+      description: Distilling from some models is restricted (see docs/LICENSES.md). Link the licence text.

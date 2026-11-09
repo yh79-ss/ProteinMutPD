@@ -1,12 +1,48 @@
+# Python and tool caches
 __pycache__/
 *.py[cod]
 *.egg-info/
+*.egg
+.eggs/
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# build outputs
 /build/
 /dist/
+
+# virtual environments and editors
 .venv/
-# runs, downloaded data and deposit staging never belong in git (anchored: src/mpd/data is source code)
+venv/
+.idea/
+.vscode/
+.DS_Store
+*.swp
+.claude/settings.local.json
+
+# What mpd writes under its working root (MPD_HOME) never belongs in git. Anchored on purpose:
+# src/mpd/data is source code, so there is no unanchored "data/" or "models/" here.
 /mpd_home/
 /runs/
 /data/
+/env/
+/hf_cache/
+/models/
+/tools/
+/cache/
 *.part
+*.incomplete-*
+
+# Slurm's default output file, if someone submits by hand from the repository root
+slurm-*.out
+
+# safety net: never commit keys or local environment files
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+.env
+.env.*

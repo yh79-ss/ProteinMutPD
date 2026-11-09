@@ -5,7 +5,6 @@ import os
 import urllib.error
 from pathlib import Path
 
-import numpy as np
 import pytest
 
 from mpd.data import fetch as fetch_mod, sources, venus_structures as vs

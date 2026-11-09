@@ -1,18 +1,19 @@
 import dataclasses
 import json
 import os
-import stat
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
+from fx_render import clean_mpd_env  # noqa: F401  (autouse: no MPD_* variable of the developer's shell reaches a plan)
+from fx_slurm import fake_slurm  # noqa: F401
 from mpd import registry
 from mpd.slurm.cluster import Cluster
 from mpd.slurm.plan import PlanError, PlanOptions, make_plan
 from mpd.slurm.render import render_script
-from mpd.slurm.submit import SubmitError, submit, write_campaign
+from mpd.slurm.submit import submit, write_campaign
 from mpd.spec import RunSpec, SpecError
 
 
@@ -80,15 +81,17 @@ def test_json_roundtrip():
 
 
 # ---------------------------------------------------------------- plan
+# Resources, estimates, identity and option validation are tested in test_plan_resources.py; the scripts in test_render.py.
 def stage(plan, name):
     return next(s for s in plan.stages if s.full_name == name)
 
 
-def test_grace_all_assay_uses_two_a100_and_keeps_global_batch(tmp_path):
-    plan = make_plan(spec(), opts(tmp_path))
-    r = plan.resolved
-    assert (r["world_size"], r["microbatch"], r["accumulation"], r["global_batch"]) == (2, 2, 16, 64)
-    t = stage(plan, "train")
+def test_grace_all_assay_defaults_to_one_a100_and_keeps_global_batch(tmp_path):
+    r = make_plan(spec(), opts(tmp_path)).resolved
+    assert (r["world_size"], r["microbatch"], r["accumulation"], r["global_batch"]) == (1, 2, 32, 64)
+    two = make_plan(spec(train_gpus=2), opts(tmp_path))
+    assert (two.resolved["world_size"], two.resolved["accumulation"]) == (2, 16)
+    t = stage(two, "train")
     assert (t.gpu, t.gpus, t.cpus, t.mem_gb, t.launcher) == ("a100", 2, 48, 360, "ddp")
 
 
@@ -124,17 +127,18 @@ def test_stage_dependencies(tmp_path):
 def test_scoring_tasks_cover_every_unit_dataset_shard(tmp_path):
     plan = make_plan(spec(method="score-one", assays=("A", "B")), opts(tmp_path))
     score = stage(plan, "score")
-    assert len(score.tasks) == 2 * (4 + 1)          # 2 units x (4 PG shards + 1 Venus shard)
+    assert len(score.tasks) == 2 * (1 + 1)          # a one-assay table is not split: 1 PG shard + 1 Venus shard per unit
     assert {t["unit"] for t in score.tasks} == {"A", "B"}
     assert {t["unit"] for t in stage(plan, "score-base").tasks} == {"base"}
+    assert len(stage(plan, "score-base").tasks) == 4 + 1
 
 
 def test_large_arrays_are_chunked_under_the_slurm_limit(tmp_path):
     assays = tuple(f"assay{i}" for i in range(450))
-    plan = make_plan(spec(method="score-one", assays=assays), opts(tmp_path))
+    plan = make_plan(spec(method="score-one", assays=assays), opts(tmp_path, score_shards={"proteingym": 4, "venusmuthub": 4}))
     parts = [s for s in plan.stages if s.name == "score"]
     assert len(parts) == 3 and all(len(p.tasks) <= 1000 for p in parts)
-    assert sum(len(p.tasks) for p in parts) == 450 * 5
+    assert sum(len(p.tasks) for p in parts) == 450 * (1 + 4)
     assert [p.task_offset for p in parts] == [0, 1000, 2000]
     assert set(stage(plan, "evaluate").depends_on) >= {p.full_name for p in parts}
 
@@ -150,11 +154,11 @@ def test_forced_gpu_count_must_divide_the_batch(tmp_path):
 
 
 def test_default_gpu_count_adapts_to_the_node_shape(tmp_path):
-    # A40 nodes have 3 GPUs; 3 x microbatch 2 does not divide 64, so the default uses 2 of them.
-    r = make_plan(spec(), opts(tmp_path, gpu="a40")).resolved
-    assert (r["world_size"], r["accumulation"]) == (2, 16)
+    # an A40 node has 2 GPUs (HPRC hardware page); Grace's profile asks for one, Vision's rule picks the widest that divides the batch
+    assert make_plan(spec(), opts(tmp_path, gpu="a40")).resolved["world_size"] == 1
+    assert make_plan(spec(train_gpus=2), opts(tmp_path, gpu="a40")).resolved["world_size"] == 2
     # an odd global batch falls back to one GPU instead of failing
-    assert make_plan(spec(global_batch=62), opts(tmp_path)).resolved["world_size"] == 1
+    assert make_plan(spec(global_batch=62), opts(tmp_path, "vision")).resolved["world_size"] == 1
 
 
 def test_unverified_gpu_warning_is_reported_once(tmp_path):
@@ -163,8 +167,11 @@ def test_unverified_gpu_warning_is_reported_once(tmp_path):
 
 
 def test_model_that_does_not_fit_any_gpu_is_rejected(tmp_path):
-    with pytest.raises(PlanError, match="needs about"):
+    # a T4 cannot train in bfloat16 at all; with the override the 3B student still needs far more than 16 GB
+    with pytest.raises(PlanError, match="no native bfloat16"):
         make_plan(spec(teacher="esm2-650m", student="esm2-3b"), opts(tmp_path, gpu="t4"))
+    with pytest.raises(PlanError, match="needs about"):
+        make_plan(spec(teacher="esm2-650m", student="esm2-3b"), opts(tmp_path, gpu="t4", allow_unsupported_gpu=True))
 
 
 def test_missing_account_is_warned_on_grace(tmp_path):
@@ -173,14 +180,16 @@ def test_missing_account_is_warned_on_grace(tmp_path):
     assert any("--account" in w for w in make_plan(spec(), o).warnings)
 
 
-# ---------------------------------------------------------------- render
+# ---------------------------------------------------------------- render (the full matrix is in test_render.py)
 def test_rendered_scripts_follow_grace_conventions(tmp_path):
-    plan = make_plan(spec(), opts(tmp_path))
+    plan = make_plan(spec(train_gpus=2), opts(tmp_path))
     text = render_script(plan, stage(plan, "train"))
     for needle in ("#SBATCH --gres=gpu:a100:2", "#SBATCH --partition=gpu", "#SBATCH --account=123456789012",
-                   "#SBATCH --export=NONE", "#SBATCH --get-user-env=L", "#SBATCH --cpus-per-task=48",
-                   "#SBATCH --mem=360G", "HF_HUB_OFFLINE=1", "--nproc_per_node=2"):
+                   "#SBATCH --cpus-per-task=48", "#SBATCH --mem=360G", "HF_HUB_OFFLINE=1", "--nproc_per_node=2",
+                   "nvidia-smi -L", "MPD_REQUIRE_CUDA=1", "XDG_CACHE_HOME=", "#SBATCH --open-mode=append"):
         assert needle in text, needle
+    # Slurm 25.05 rejects --get-user-env=L, --export=NONE implies --get-user-env, and no verified Grace job used either
+    assert "--export" not in text and "--get-user-env" not in text
     assert "torch.distributed.run" in text and "bin/torchrun" not in text
     assert "module load" not in text                       # grace profile needs no modules by default
 
@@ -205,60 +214,33 @@ def test_cpu_stage_has_no_gres(tmp_path):
 def test_vision_script_uses_its_qos_and_modules(tmp_path):
     plan = make_plan(spec(), opts(tmp_path, "vision"))
     text = render_script(plan, stage(plan, "train"))
-    assert "#SBATCH --qos=standard" in text and "module load CUDA/12.8.0" in text
+    assert "#SBATCH --qos=standard" in text and "module load CUDA/12.8.0" in text and "#SBATCH --gres=gpu:H200:4" in text
 
 
-# ---------------------------------------------------------------- submit (fake sbatch)
-def fake_slurm(tmp_path, fail_on=None):
-    d = tmp_path / "bin"
-    d.mkdir()
-    log = tmp_path / "calls.log"
-    (d / "sbatch").write_text(f"""#!/bin/bash
-echo "$@" >> {log}
-n=$(grep -c . {log})
-if [ -n "{fail_on or ''}" ] && [[ "$*" == *"{fail_on or 'NEVER'}"* ]]; then echo "sbatch: error: invalid account" >&2; exit 1; fi
-echo "(from job_submit) your job is charged as below" >&2
-echo $((1000 + n))
-""")
-    (d / "scancel").write_text(f"#!/bin/bash\necho \"scancel $@\" >> {log}\n")
-    for f in d.iterdir():
-        f.chmod(f.stat().st_mode | stat.S_IEXEC)
-    return d, log
+def test_job_names_and_tags_survive_write_campaign(tmp_path):
+    """The scripts on disk carry the plan's own tag; `mpd status/cancel` and the submit retry logic find jobs by it."""
+    plan = make_plan(spec(), opts(tmp_path, nonce="abcdef123456"))
+    scripts = write_campaign(plan)
+    assert plan.campaign_dir.name == plan.campaign_id and (plan.campaign_dir / "logs").is_dir()      # Slurm will not create --output
+    for name, path in scripts.items():
+        assert f"#SBATCH --comment=mpd:{plan.campaign_id}:abcdef123456:{name}\n" in path.read_text()
+    resolved = json.loads((plan.campaign_dir / "resolved.json").read_text())
+    assert resolved["campaign_id"] == plan.campaign_id and resolved["score_shards"] == {"proteingym": 4, "venusmuthub": 1}
 
 
-def test_submit_chains_dependencies_and_records_ids(tmp_path):
+# ---------------------------------------------------------------- hand-off to submit (the submit logic has its own tests)
+def test_submit_chains_the_planned_stages_with_their_tags(tmp_path, fake_slurm):
     plan = make_plan(spec(), opts(tmp_path))
     scripts = write_campaign(plan)
-    d, log = fake_slurm(tmp_path)
-    ids = submit(plan, scripts, sbatch=str(d / "sbatch"), echo=lambda *_: None)
-    calls = log.read_text().splitlines()
-    assert len(calls) == len(plan.stages)
-    assert "--dependency" not in calls[0]                                   # prepare
-    train_call = next(c for c in calls if "train.sbatch" in c)
-    assert f"--dependency=afterok:{ids['teacher']}" in train_call and "--kill-on-invalid-dep=yes" in train_call
-    eval_call = next(c for c in calls if "evaluate.sbatch" in c)
-    assert ids["score"] in eval_call and ids["score-base"] in eval_call
-    assert json.loads((plan.campaign_dir / "SUBMITTED.json").read_text())["jobs"] == ids
-
-
-def test_resubmitting_is_refused_without_force(tmp_path):
-    plan = make_plan(spec(), opts(tmp_path))
-    scripts = write_campaign(plan)
-    d, _ = fake_slurm(tmp_path)
-    submit(plan, scripts, sbatch=str(d / "sbatch"), echo=lambda *_: None)
-    with pytest.raises(SubmitError, match="already submitted"):
-        submit(plan, scripts, sbatch=str(d / "sbatch"), echo=lambda *_: None)
-
-
-def test_failure_cancels_already_queued_jobs(tmp_path, monkeypatch):
-    plan = make_plan(spec(), opts(tmp_path))
-    scripts = write_campaign(plan)
-    d, log = fake_slurm(tmp_path, fail_on="score.sbatch")
-    monkeypatch.setenv("PATH", f"{d}:{os.environ['PATH']}")
-    with pytest.raises(SubmitError, match="rejected stage score"):
-        submit(plan, scripts, sbatch=str(d / "sbatch"), echo=lambda *_: None)
-    assert "scancel" in log.read_text()
-    assert not (plan.campaign_dir / "SUBMITTED.json").exists()
+    ids = submit(plan, scripts, echo=lambda *_: None, sleep=fake_slurm.sleep)
+    assert list(ids) == [s.full_name for s in plan.stages]
+    jobs = fake_slurm.submitted()
+    assert [j["stage"] for j in jobs] == list(ids)
+    assert all(j["comment"].startswith(f"mpd:{plan.campaign_id}:{plan.nonce}:") for j in jobs)
+    train = next(j for j in jobs if j["stage"] == "train")
+    assert train["deps"] == [int(ids["teacher"])] and train["gres"] == "gpu:a100:1"
+    marker = json.loads((plan.campaign_dir / "SUBMITTED.json").read_text())
+    assert marker["jobs"] == ids and marker["campaign_id"] == plan.campaign_id and marker["nonce"] == plan.nonce
 
 
 def test_cli_plan_runs_without_torch(tmp_path):
@@ -272,3 +254,12 @@ def test_cli_plan_runs_without_torch(tmp_path):
     out = subprocess.run([sys.executable, "-s", "-c", code, str(tmp_path)], env=env, capture_output=True, text=True)
     assert out.returncode == 0, out.stderr
     assert "estimated upper bound" in out.stdout
+
+
+def test_the_planner_modules_import_without_torch_or_yaml_extras():
+    src = str(Path(__file__).parents[1] / "src")
+    code = (f"import sys; sys.path.insert(0, {src!r}); import mpd.envrecord, mpd.presets, mpd.slurm.cluster, mpd.slurm.plan, "
+            "mpd.slurm.render; bad = [m for m in ('torch', 'transformers', 'peft', 'pandas') if m in sys.modules]; print(bad)")
+    out = subprocess.run([sys.executable, "-s", "-c", code], capture_output=True, text=True,
+                         env={k: v for k, v in os.environ.items() if k != "PYTHONPATH"})
+    assert out.returncode == 0 and out.stdout.strip() == "[]", out.stderr

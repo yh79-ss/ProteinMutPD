@@ -1,0 +1,6 @@
+include LICENSE README.md CHANGELOG.md CITATION.cff CONTRIBUTING.md SECURITY.md
+graft constraints
+graft docs
+graft scripts
+graft tests
+global-exclude __pycache__ *.py[cod] .DS_Store

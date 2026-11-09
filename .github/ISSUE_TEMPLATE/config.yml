@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Troubleshooting guide
+    url: https://github.com/yh79-ss/ProteinMutPD/blob/main/docs/TROUBLESHOOTING.md
+    about: Symptoms and fixes for the common failures (missing weights, quota, module errors, pending jobs).
+  - name: Cluster account, quota or queue problems
+    url: https://hprc.tamu.edu/
+    about: Allocations, policies and queue questions go to your cluster's support team, not here.

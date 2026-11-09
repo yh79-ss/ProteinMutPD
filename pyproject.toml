@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77.0.3"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,30 +7,56 @@ name = "proteinmutpd"
 version = "0.1.0.dev0"
 description = "Distill protein mutation-effect predictors into smaller students and benchmark them on ProteinGym and VenusMutHub, submitted as Slurm jobs."
 readme = "README.md"
-license = { file = "LICENSE" }
-requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+# authors: left out on purpose until the owner fills in the author list (see the TODO in CITATION.cff).
+keywords = ["protein language model", "knowledge distillation", "variant effect prediction", "ProteinGym", "VenusMutHub", "Slurm", "HPC"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Science/Research",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+requires-python = ">=3.11"
+# What the planner, `mpd fetch` and `mpd doctor` need on a login node (no torch). The floors are the lowest
+# minor versions the test suite was run with (numpy 1.26.4, scipy 1.14.1, PyYAML 6.0.3 on Python 3.11).
 dependencies = [
-    "numpy",
-    "pyyaml",
-    "scipy",
-    "pandas",
+    "numpy>=1.26",
+    "pyyaml>=6.0",
+    "scipy>=1.14",
 ]
 
 [project.optional-dependencies]
-# Needed on the compute nodes (training / scoring). The CLI that plans and
-# submits jobs only needs the base dependencies, so it is safe on a login node.
+# Compute nodes (prepare, teacher, train, score, evaluate). Ranges are loose on purpose; the tested set is
+# pinned in constraints/grace.txt: pip install -c constraints/grace.txt '.[train]'. torch 2.7.0 is the lowest release the
+# suite was run with (CPU); the newest compatible versions on 2026-11-09 (torch 2.15, transformers 4.57, peft 0.21) passed too.
 train = [
-    "torch",
+    "torch>=2.7",
     "transformers>=4.51,<5",
     "peft>=0.13",
-    "accelerate",
-    "safetensors",
 ]
-test = ["pytest"]
+# Only for MPD_3DI_ENGINE=biotite (the default 3Di engine is Foldseek). biotite 1.6 needs Python 3.11.
+structure = [
+    "biotite>=1.6,<2; python_version >= '3.11'",
+]
+test = ["pytest>=8"]
+dev = [
+    "pytest>=8",
+    "build",
+    "twine",
+    "ruff==0.17.4",
+]
 
 [project.urls]
 Homepage = "https://github.com/yh79-ss/ProteinMutPD"
 Issues = "https://github.com/yh79-ss/ProteinMutPD/issues"
+Changelog = "https://github.com/yh79-ss/ProteinMutPD/blob/main/CHANGELOG.md"
 
 [project.scripts]
 mpd = "mpd.cli:main"
@@ -47,3 +73,14 @@ markers = [
     "gpu: needs a CUDA device",
     "slow: loads a real pretrained checkpoint (needs network or a populated cache)",
 ]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 130   # the code is written to about this width; E501 is not enabled
+
+[tool.ruff.lint]
+# Bugs only: syntax errors, imports, format strings, undefined names, unused variables, invalid escapes, and two
+# bugbear checks. F811 is left out because tests import pytest fixtures from tests/fx_*.py and take them as arguments.
+select = ["E9", "F4", "F5", "F6", "F7", "F82", "F841", "W605", "B006", "B023"]
+# `ruff check --fix` must never delete an "unused" import: tests import pytest fixtures by name and take them as arguments.
+unfixable = ["F401"]

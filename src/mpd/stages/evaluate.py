@@ -6,13 +6,13 @@ readouts, and reports assay-macro Spearman for the frozen base student and for e
   delta   s[mut] - s[wt]                            the zero-shot masked-marginal convention
   dual    log softmax(s/1.0)[mut] - log softmax(s/1.5)[wt]   the readout Score-KD trains
 
-The primary readout is `delta` for direct-logit runs and `dual` for score runs; both are always reported.
+Both readouts are always reported. Which one is called primary (delta for direct-logit runs, dual for score runs)
+is the maintainer's assumption, not a confirmed convention; summary.json says so in `primary_readout_basis`.
 """
 
 from __future__ import annotations
 
 import csv
-import re
 
 import numpy as np
 from scipy.stats import spearmanr
@@ -20,25 +20,43 @@ from scipy.stats import spearmanr
 from ..contexts import ContextTable, sequence_hash
 from ..data.benchmarks import Benchmark
 from ..objectives import readout_delta, readout_dual
-from .common import Campaign, stage_main, write_json
+from .common import SHARD_JSON, Campaign, provenance, shard_name, stage_main, write_json
 
 READOUTS = {"delta": readout_delta, "dual": readout_dual}
 PRIMARY = {"direct_logits": "delta", "score": "dual"}
-_SHARD = re.compile(r"shard_(\d+)_of_(\d+)\.json$")
+PRIMARY_BASIS = "assumed, not confirmed: delta for direct_logits runs, dual for score runs; both readouts are always reported"
+
+
+def shard_marks(folder) -> list[tuple[int, int]]:
+    """(shard, num) of every finished shard file in `folder`."""
+    return sorted((int(m.group(1)), int(m.group(2))) for p in folder.glob("shard_*.json") if (m := SHARD_JSON.search(p.name)))
 
 
 def assemble(c: Campaign, dataset: str, unit: str) -> tuple[ContextTable, np.ndarray]:
-    """All shards of (dataset, unit) as one [N, 20] array aligned with the evaluation context table."""
+    """All shards of (dataset, unit) as one [N, 20] array aligned with the evaluation context table.
+
+    Only shard files whose count is the planned one are read; files of another count are ignored."""
     table = ContextTable.load(c.stem_eval_for(unit, dataset))
     folder = c.score_dir(dataset, unit)
-    marks = [(int(m.group(1)), int(m.group(2))) for p in sorted(folder.glob("shard_*.json")) if (m := _SHARD.search(p.name))]
-    totals = {n for _, n in marks}
-    if len(totals) != 1 or {i for i, _ in marks} != set(range(next(iter(totals), 0))):
-        raise RuntimeError(f"{folder}: shards incomplete (have {sorted(marks)})")
-    num = totals.pop()
+    marks = shard_marks(folder)
+    num = c.expected_shards(dataset, unit)
+    again = "Run the score stage again for this unit and dataset (`mpd status` shows which tasks failed)."
+    if num is None:                           # planned before the count was recorded: the files must agree among themselves
+        counts = sorted({n for _, n in marks})
+        if len(counts) != 1:
+            raise RuntimeError(f"{folder}: shards incomplete (shard files exist for counts {counts or 'none'}, "
+                               f"expected exactly one). {again}")
+        num = counts[0]
+    have = sorted(i for i, n in marks if n == num)
+    if have != list(range(num)):
+        ignored = sorted({n for _, n in marks if n != num})
+        raise RuntimeError(f"{folder}: shards incomplete (have {have} of {num}; missing {sorted(set(range(num)) - set(have))})"
+                           + (f"; shard files for other counts {ignored} are ignored" if ignored else "") + f". {again}")
     scores = np.full((len(table), 20), np.nan, dtype=np.float32)
     for shard in range(num):
-        with np.load(folder / f"shard_{shard:03d}_of_{num:03d}.npz") as z:
+        with np.load(folder / f"{shard_name(shard, num)}.npz") as z:
+            if "num_shards" in z and int(z["num_shards"]) != num:
+                raise RuntimeError(f"{folder}: {shard_name(shard, num)}.npz was written for {int(z['num_shards'])} shards")
             scores[z["rows"]] = z["scores"]
     if np.isnan(scores).any():
         raise RuntimeError(f"{folder}: some evaluation contexts were never scored")
@@ -71,9 +89,11 @@ def macro(values) -> float:
 def run(c: Campaign, task: dict) -> None:
     primary = PRIMARY[c.spec.objective]
     per_assay: list[dict] = []
+    totals: dict[str, int] = {}
     for dataset in c.spec.eval_data:
         bm = c.benchmark(dataset)
         all_ids = sorted(a.assay_id for a in bm.assays())
+        totals[dataset] = len(all_ids)
         for unit in ["base", *c.units]:
             table, scores = assemble(c, dataset, unit)
             where = {k: i for i, k in enumerate(table.keys())}
@@ -94,15 +114,19 @@ def run(c: Campaign, task: dict) -> None:
         by.setdefault((row["dataset"], row["unit"], row["readout"]), {})[row["assay_id"]] = row["spearman"]
     summary = []
     for (dataset, unit, readout), values in sorted(by.items()):
-        entry = {"dataset": dataset, "unit": unit, "readout": readout, "assays": len(values), "macro_spearman": macro(values.values()),
-                 "primary": readout == primary}
+        entry = {"dataset": dataset, "unit": unit, "readout": readout, "assays": len(values),
+                 "assays_finite": sum(bool(np.isfinite(x)) for x in values.values()),
+                 "macro_spearman": macro(values.values()), "primary": readout == primary}
         if unit != "base":
             base = by[(dataset, "base", readout)]
             entry["base_macro_same_assays"] = macro(base[a] for a in values)
             entry["delta_vs_base"] = entry["macro_spearman"] - entry["base_macro_same_assays"]
         summary.append(entry)
     write_json(out / "summary.json", {"campaign": c.resolved["campaign_id"], "objective": c.spec.objective,
-                                      "primary_readout": primary, "results": summary, "dms_labels_opened": True})
+                                      "primary_readout": primary, "primary_readout_basis": PRIMARY_BASIS,
+                                      "eval_data": list(c.spec.eval_data), "units": ["base", *c.units],
+                                      "assays_in_dataset": totals, "results": summary, "dms_labels_opened": True,
+                                      "provenance": provenance()})
     for e in summary:
         if e["primary"]:
             extra = f"  base {e['base_macro_same_assays']:.4f}  delta {e['delta_vs_base']:+.4f}" if "delta_vs_base" in e else ""

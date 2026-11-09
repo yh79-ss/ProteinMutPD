@@ -90,7 +90,8 @@ def write_archive(members: list[tuple[str, Path]], out: Path) -> None:
 
 
 def safe_extract_tar(archive: Path, dest: Path) -> list[Path]:
-    """Extract regular files only; refuse absolute paths, `..`, links and devices."""
+    """Extract regular files only; refuse absolute paths, `..`, links and devices. A member that is executable in
+    the archive is executable on disk (mode 0755, never setuid or group-writable)."""
     dest = dest.resolve()
     written = []
     with tarfile.open(archive, "r:*") as tar:
@@ -103,6 +104,8 @@ def safe_extract_tar(archive: Path, dest: Path) -> list[Path]:
             elif member.isreg():
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(tar.extractfile(member).read())
+                if member.mode & 0o111:
+                    target.chmod(0o755)
                 written.append(target)
             else:
                 raise ValueError(f"{archive}: unsupported member type for {member.name!r}")
