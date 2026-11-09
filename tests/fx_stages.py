@@ -32,12 +32,15 @@ def env(monkeypatch, tiny_home, tiny_models):
 
 
 def plan_for(home, score_shards=2, **kw):
-    kw = {"method": "direct-all", "updates": 6, "global_batch": 4, "dev_fraction": 0.3, **kw}
+    """A written campaign on the tiny data. Defaults: ESM2-35M teacher, ESM2-8M student, ProteinGym for training and
+    evaluation; any RunSpec field (teacher, student, train_data, eval_data, method, ...) can be given."""
+    kw = {"teacher": "esm2-35m", "student": "esm2-8m", "train_data": "proteingym", "eval_data": ("proteingym",),
+          "method": "direct-all", "updates": 6, "global_batch": 4, "dev_fraction": 0.3, **kw}
     if kw["method"].endswith("all"):
         kw.setdefault("train_gpus", 1)
-    spec = RunSpec(teacher="esm2-35m", student="esm2-8m", train_data="proteingym", eval_data=("proteingym",), **kw)
+    spec = RunSpec(**kw)
     plan = make_plan(spec, PlanOptions(cluster=Cluster.load("vision"), home=home, python=sys.executable,
-                                       score_shards={"proteingym": score_shards}))
+                                       score_shards={dataset: score_shards for dataset in kw["eval_data"]}))
     write_campaign(plan)
     return plan
 

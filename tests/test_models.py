@@ -96,7 +96,7 @@ def test_every_available_model_can_be_fetched():
     available = [k for k, m in registry.MODELS.items() if m.status == "available"]
     assert available and set(available) <= set(models.pinned_keys())
     assert models.fetchable_keys() == [k for k in models.pinned_keys() if registry.get(k).status == "available"]
-    assert set(SEVEN[:5]) <= set(models.fetchable_keys())          # SaProt joins when the registry flips it
+    assert set(SEVEN) <= set(models.fetchable_keys())              # all seven, since SaProt became available
 
 
 def test_nothing_with_an_output_licence_lock_is_pinned():

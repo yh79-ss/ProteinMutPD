@@ -616,6 +616,49 @@ def test_preflight_names_the_fix_for_each_missing_piece(tmp_path, monkeypatch):
     assert plain["foldseek"].fix == f"mpd fetch foldseek --home {tmp_path}"
 
 
+HOME = "/scratch/user/netid/mpd"                       # a placeholder, not anybody's directory
+
+
+@pytest.mark.parametrize("cluster, home, explicit, expect", [
+    ("grace", HOME, False, "mpd fetch foldseek --cluster grace"),                       # the profile's default home: not repeated
+    ("grace", HOME, True, f"mpd fetch foldseek --cluster grace --home {HOME}"),         # --home was given: repeated
+    (None, HOME, False, f"mpd fetch foldseek --home {HOME}"),                           # no cluster name to put the home behind
+    (None, None, False, "mpd fetch foldseek --cluster <cluster>"),                      # neither: a placeholder to fill in
+    (None, None, True, "mpd fetch foldseek --cluster <cluster>"),
+    ("grace", "/scratch/user/netid/my mpd", True, "mpd fetch foldseek --cluster grace --home '/scratch/user/netid/my mpd'"),
+])
+def test_the_foldseek_fix_command_has_four_forms(cluster, home, explicit, expect, monkeypatch):
+    monkeypatch.delenv("MPD_FOLDSEEK", raising=False)
+    assert foldseek.fix_command(cluster, home, explicit_home=explicit) == expect
+    said = build.missing_foldseek(home, cluster, explicit_home=explicit)
+    assert f"Run on a login node: {expect} " in said and "MPD_FOLDSEEK" in said            # and the way to use a Foldseek you have
+
+
+@pytest.mark.parametrize("cluster, explicit, flags", [
+    ("grace", False, "--cluster grace"),
+    ("grace", True, f"--cluster grace --home {HOME}"),
+    (None, False, f"--home {HOME}"),
+])
+def test_every_structure_preflight_fix_repeats_the_home_only_when_it_must(cluster, explicit, flags, monkeypatch):
+    monkeypatch.delenv("MPD_FOLDSEEK", raising=False)
+    spec = spec_for(eval_data=("proteingym", "venusmuthub"))
+    checks = by_name(preflight_checks(spec, Path(HOME), cluster, explicit_home=explicit))
+    assert checks["foldseek"].fix == f"mpd fetch foldseek {flags}"
+    assert checks["structures:proteingym"].fix == f"mpd fetch proteingym {flags}"
+    assert checks["structures:venusmuthub"].fix == f"mpd fetch venus-structures {flags} --from-dir <folder with the deposit files>"
+    for check in checks.values():
+        assert "mpd fetch" in check.message and check.fix in check.message, check.name
+
+
+def test_the_proteingym_structures_come_with_the_proteingym_download(tmp_path):
+    """`mpd fetch proteingym` downloads and unpacks ProteinGym_AF2_structures.zip (sources.PROTEINGYM), so that is the fix."""
+    archive = next(f for f in sources.PROTEINGYM.files if f.name == "ProteinGym_AF2_structures.zip")
+    assert archive.name in sources.PROTEINGYM.unpack and archive.size == 19_173_248
+    message = by_name(preflight_checks(spec_for(), tmp_path, "grace"))["structures:proteingym"].message
+    assert "ProteinGym_AF2_structures.zip, 19.2 MB" in message and "part of the ProteinGym download" in message
+    assert message.endswith("Run on a login node: mpd fetch proteingym --cluster grace")
+
+
 def test_preflight_passes_when_everything_is_in_place(tmp_path, fake_foldseek, monkeypatch):
     write_tiny_structure_home(tmp_path)
     manifest = tmp_path / "data" / sources.VENUS_STRUCTURES.dirname

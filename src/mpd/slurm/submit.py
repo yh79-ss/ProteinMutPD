@@ -27,7 +27,7 @@ from .campaign import (BLOCKING, MARKER, CampaignError, CampaignState, JobState,
 if TYPE_CHECKING:
     from ..checks import Check
 
-__all__ = ["BLOCKING", "CampaignError", "CampaignState", "JobState", "QueueRow", "SubmitError", "TRANSIENT_ERRORS", "campaign_state",
+__all__ = ["BLOCKING", "CampaignError", "CampaignState", "FORCE_APPLIES", "JobState", "QueueRow", "SubmitError", "TRANSIENT_ERRORS", "campaign_state",
            "cancel", "classify", "failure_log", "failure_tail", "job_states", "list_campaigns", "log_tail",
            "pending_reasons", "preflight_checks", "resolve_campaign", "stage_log", "stage_progress", "submit", "write_campaign"]
 
@@ -123,19 +123,30 @@ def _cannot_write(what: Path | str, exc: Exception) -> SubmitError:
     return SubmitError(f"cannot write {what} ({exc}). Is the disk or your quota full? `mpd doctor` checks free space.")
 
 
+SCHEDULING_OPTIONS = ("--train-time, --score-time, --teacher-time, --array-throttle, --sbatch-arg, --module or --env "
+                      "(except MPD_DTYPE, MPD_TF32 and MPD_STRUCTURE_LEGACY_MASK)")
+# Said wherever a second submission is refused: the recovery is the same command plus --force, and the student must know that the
+# options they changed for the recovery are applied by it. Kept stages are not: Slurm cannot change a queued job's script.
+FORCE_APPLIES = (f"A changed {SCHEDULING_OPTIONS} keeps the campaign (its id does not depend on them), and --force applies it to the "
+                 "stages it queues again; a stage that is still queued or running keeps the options it was submitted with. "
+                 "A changed --gpu, --train-gpus, --eval-data or --score-shards is a different campaign that trains again from the start.")
+
+
 def _blocked(old: dict, cid: str) -> str:
     state, when = old.get("state"), old.get("submitted_at") or "earlier"
     jobs = ", ".join(f"{s}={j}" for s, j in (old.get("jobs") or {}).items()) or "none recorded"
     follow = f"`mpd status {cid}` shows where it is, `mpd cancel {cid}` removes its jobs"
     if state == "submitted":
         return (f"{cid} was already submitted ({when}; jobs {jobs}). {follow}. Add --force to queue only the stages whose job "
-                "died or is missing; stages that are queued, running or finished are kept. Nothing was written.")
+                f"died or is missing; stages that are queued, running or finished are kept. {FORCE_APPLIES} Nothing was written.")
     if state == "partial":
         return (f"{cid} was only partly submitted ({when}; jobs {jobs}): {old.get('message') or 'a stage could not be queued'}. "
-                f"{follow}. Run the same command with --force to continue the chain from the first missing stage. Nothing was written.")
+                f"{follow}. Run the same command with --force to continue the chain from the first missing stage. {FORCE_APPLIES} "
+                "Nothing was written.")
     if state == "submitting":
         return (f"a submission of {cid} started {when} and did not finish (jobs queued so far: {jobs}). It may still be running in "
-                f"another terminal, or it was killed. {follow}. Run the same command with --force to continue it. Nothing was written.")
+                f"another terminal, or it was killed. {follow}. Run the same command with --force to continue it. {FORCE_APPLIES} "
+                "Nothing was written.")
     return (f"{cid} has a {MARKER} that cannot be read ({old.get('message') or 'unknown error'}), so mpd cannot tell whether it is "
             f"queued. Check `squeue -u $USER`; delete the file to start over, or run `mpd cancel {cid}`. Nothing was written.")
 
@@ -148,12 +159,33 @@ def _same_json(path: Path, text: str) -> bool:
         return False
 
 
+def _what_differs(path: Path, text: str) -> str:
+    """How a recipe file on disk differs from the one this command would write, in a few words."""
+    try:
+        old = json.loads(path.read_text(encoding="utf-8"))
+    except OSError:
+        return "missing on disk"
+    except ValueError:
+        return "not valid JSON on disk"
+    new = json.loads(text)
+    if isinstance(old, dict) and isinstance(new, dict):
+        keys = sorted(k for k in {*old, *new} if old.get(k, "<absent>") != new.get(k, "<absent>"))
+
+        def short(value) -> str:
+            return json.dumps(value)[:40]
+        shown = [f"{k}: {short(old.get(k, '<absent>'))} on disk, {short(new.get(k, '<absent>'))} now" for k in keys[:5]]
+        return "; ".join(shown) + (f"; and {len(keys) - 5} more" if len(keys) > 5 else "")
+    if isinstance(old, list) and isinstance(new, list):
+        return f"{len(old)} tasks on disk, {len(new)} now"
+    return "different content"
+
+
 def write_campaign(plan, *, force: bool = False, render=None) -> dict[str, Path]:
     """Create the campaign directory with spec, resolved recipe, task lists and sbatch scripts; returns the scripts.
 
     Refuses, writing nothing, while the campaign is submitted, being submitted or half submitted. With ``force`` the
-    recipe files are left alone (and must equal the plan's: a submitted campaign is never rewritten) and only the
-    scripts and plan.json are written again."""
+    recipe files are left alone (and must equal the plan's: a campaign is never rewritten once it was submitted, whatever
+    became of its jobs) and only the scripts and plan.json are written again."""
     root = Path(plan.campaign_dir)
     cid = _campaign_id(plan)
     old = read_marker(root)
@@ -165,22 +197,31 @@ def write_campaign(plan, *, force: bool = False, render=None) -> dict[str, Path]
     for stage in plan.stages:
         all_tasks.setdefault(stage.name, []).extend(stage.tasks)
     recipe.update({f"tasks/{name}.json": json.dumps(tasks, indent=1) + "\n" for name, tasks in all_tasks.items()})
-    if blocked:
+    if old is not None:         # also after `mpd cancel` or a failed submission: its finished stages are kept, so the recipe must be the same
         changed = [rel for rel, text in recipe.items() if not _same_json(root / rel, text)]
         if changed:
-            raise SubmitError(f"{root} already holds a submitted campaign with a different recipe ({', '.join(changed)}). A submitted "
-                              "campaign is never rewritten: change --seed to start a new one, or remove the directory.")
+            lines = [f"  {rel}: {_what_differs(root / rel, recipe[rel])}" for rel in changed]
+            head = (f"{root} already holds a submitted campaign with a different recipe ({', '.join(changed)}), so --force cannot "
+                    "continue it:" if blocked else
+                    f"{root} holds a campaign that ended as {old['state']} and has a different recipe ({', '.join(changed)}), so it "
+                    "cannot be submitted again; its finished stages would be mixed with the new recipe:")
+            raise SubmitError(
+                head + "\n" + "\n".join(lines)
+                + "\nA submitted campaign is never rewritten. Its recipe follows from the options in its id (--eval-data, --gpu, "
+                  "--train-gpus, --score-shards, the recipe flags and --seed) and from the mpd version, presets and model registry that "
+                  "wrote it, so the usual cause is another mpd version or an edited file. Run the command with the mpd version that "
+                  "created the campaign, or change --seed to start a new campaign, or remove the directory (`mpd cancel` its jobs first).")
     render = render or _default_render()
     try:
-        return _write_files(plan, root, cid, recipe, blocked, render)
+        return _write_files(plan, root, cid, recipe, old is not None, render)
     except OSError as exc:
         raise _cannot_write(f"the campaign directory {root}", exc) from exc
 
 
-def _write_files(plan, root: Path, cid: str, recipe: dict[str, str], blocked: bool, render) -> dict[str, Path]:
+def _write_files(plan, root: Path, cid: str, recipe: dict[str, str], written: bool, render) -> dict[str, Path]:
     for sub in ("scripts", "tasks", "logs"):
         (root / sub).mkdir(parents=True, exist_ok=True)
-    if not blocked:
+    if not written:
         for rel, text in recipe.items():
             write_text_atomic(root / rel, text)
     scripts = {}
@@ -189,10 +230,21 @@ def _write_files(plan, root: Path, cid: str, recipe: dict[str, str], blocked: bo
         write_text_atomic(path, render(plan, stage))
         scripts[stage.full_name] = path
     summary = {"schema": 1, "campaign_id": cid, "nonce": _nonce(plan), "cluster": _cluster_name(plan),
-               "stages": [{**{k: v for k, v in asdict(s).items() if k != "tasks"}, "n_tasks": len(s.tasks)} for s in plan.stages],
+               "stages": [{**{k: v for k, v in asdict(s).items() if k != "tasks"}, "n_tasks": len(s.tasks),
+                           "partition_limit_s": _partition_limit(plan, s)} for s in plan.stages],
                "estimated_su_upper_bound": plan.total_su, "warnings": plan.warnings}
     write_json_atomic(root / "plan.json", summary)
     return scripts
+
+
+def _partition_limit(plan, stage) -> int | None:
+    """Longest walltime the cluster profile allows for this stage, kept in plan.json so `mpd status` can say how much more a
+    TIMEOUT may ask for. None when the plan does not know (a stand-in plan, a profile without the figure)."""
+    cluster = getattr(getattr(plan, "options", None), "cluster", None)
+    try:
+        return int(cluster.gpus[stage.gpu].max_walltime_s if stage.gpu else cluster.cpu_max_walltime_s)
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return None
 
 
 # ---------------------------------------------------------------- submitting
@@ -221,6 +273,7 @@ class _Submission:
         self.cid, self.nonce = _campaign_id(plan), _nonce(plan)
         self.jobs: dict[str, str] = {}          # stage -> job id, kept and new: the ones later stages may wait for
         self.finished: dict[str, str] = {}      # stage -> job id of a stage whose output files exist (history only)
+        self.kept: dict[str, str] = {}          # stage -> job id of a stage --force found queued or running and left alone
         self.new: dict[str, str] = {}           # queued by this call (the only ones a failure cancels when continuing)
         self.replaced: dict[str, list[str]] = {}
         self.retried: set[str] = set()
@@ -260,6 +313,9 @@ class _Submission:
             self.resume = True
             self.submitted_at = old.get("submitted_at") or self.submitted_at
         else:
+            # cancelled or failed: none of its jobs is meant to be alive, but stages whose output files exist are not queued again
+            # (a finished teacher would wait for a GPU only to print "already computed"), and a survivor is kept, never duplicated
+            self.resume = True
             self.echo(f"the earlier submission of this campaign {old['state']}"
                       + (f" ({old['message']})" if old.get("message") else "") + "; submitting it again")
 
@@ -279,7 +335,7 @@ class _Submission:
         rows, why = read_queue(self.squeue)
         if rows is None:
             raise SubmitError(f"cannot continue {self.cid}: squeue did not answer ({why}), so mpd cannot tell which stages are still "
-                              "queued. Try again when `squeue -u $USER` works.")
+                              "queued. Try again when `squeue -u $USER` answers.")
         recorded = {str(k): str(v) for k, v in (old.get("jobs") or {}).items()}
         self.replaced = {str(k): [str(i) for i in v] for k, v in (old.get("replaced") or {}).items() if isinstance(v, list)}   # earlier rounds stay on record
         alive = {r.job_id for r in rows if r.alive}
@@ -507,7 +563,7 @@ class _Submission:
                               "scripts without calling it.")
         scripts = self._scripts()
         keep, done, stale = self._reconcile(old) if self.resume else ({}, set(), [])
-        self.jobs = dict(keep)
+        self.jobs, self.kept = dict(keep), dict(keep)
         if old is None:
             try:
                 created = create_marker(self.root, self._marker("submitting"))
@@ -550,6 +606,10 @@ class _Submission:
             self.echo(f"nothing to submit: every stage of {self.cid} is queued, running or finished")
         else:
             self.echo(f"\nsubmitted {len(self.new)} job(s) for {self.cid}")
+            if self.kept:       # Slurm cannot change the script of a queued job, so a changed walltime or node option is not applied to it
+                self.echo(f"note: kept stages ({', '.join(self.kept)}) stay queued or running with the options they were submitted with; "
+                          "a changed walltime, --sbatch-arg or --module applies to the stages queued now. To change a job that is still "
+                          "waiting, `mpd cancel` the campaign and submit it again")
         for what, cmd in (("follow it", f"mpd status {self.cid}"), ("read logs", f"mpd logs {self.cid} [STAGE] [--err]"),
                           ("cancel", f"mpd cancel {self.cid}"), ("results", f"mpd results {self.cid}   (after the evaluate stage)")):
             self.echo(f"  {what:<10} {cmd}")
@@ -564,7 +624,8 @@ def submit(plan, scripts: dict[str, Path] | None = None, *, force: bool = False,
     queued are cancelled (Ctrl-C included) and the marker says `failed`, or `partial` when something may still be queued. A
     controller error is retried after `wait_s` seconds (growing, at most `retries` times, `budget_s` seconds in all) but only
     once `squeue` answers and shows no job carrying this submission's tag. A marker in state submitting, submitted or partial
-    refuses a second submission unless ``force``, which then keeps the stages that are queued or finished and queues the rest."""
+    refuses a second submission unless ``force``, which then keeps the stages that are queued or finished and queues the rest.
+    After `mpd cancel` or a failed submission no ``force`` is needed, and the stages that finished are kept the same way."""
     return _Submission(plan, scripts, force=force, sbatch=sbatch, squeue=squeue, scancel=scancel, retries=retries, wait_s=wait_s,
                        budget_s=budget_s, echo=echo, sleep=sleep, clock=clock).run()
 
@@ -681,7 +742,7 @@ def preflight_checks(plan, scripts: dict[str, Path] | None = None, *, sbatch: st
         elif classify(message) == "transient":
             unreachable = True
             checks.append(Check(label, "skip", f"the Slurm controller did not answer ({_gist(message)}); the scripts were not tested",
-                                "run `mpd doctor` again when `squeue -u $USER` works"))
+                                "run `mpd doctor` again when `squeue -u $USER` answers"))
         else:
             shown = _culprits(message, entry["entries"]) or entry["lines"]
             checks.append(Check(label, "error", f"sbatch --test-only refused these lines: {'; '.join(shown)}  Slurm said: {message}",

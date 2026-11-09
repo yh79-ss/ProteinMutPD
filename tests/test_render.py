@@ -338,21 +338,37 @@ def test_set_u_catches_a_typo_after_the_prologue(tmp_path):
 # ---------------------------------------------------------------- forwarded and user environment
 def test_forwarding_allowlist_and_absolute_paths(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    for name, value in dict(MPD_MODEL_ESM2_650M="weights/esm2-650m", MPD_MODELS_DIR="models", MPD_FOLDSEEK="foldseek",
+    for name, value in dict(MPD_MODEL_ESM2_650M="weights/esm2-650m", MPD_MODELS_DIR="models", MPD_FOLDSEEK="tools/foldseek/bin/foldseek",
                             MPD_DTYPE="float32", MPD_TF32="1", MPD_KEEP_ALL_CHECKPOINTS="1", MPD_3DI_ENGINE="foldseek",
-                            MPD_CKPT_EVERY="100", MPD_STRUCTURE_LEGACY_MASK="1", MPD_HOME="/should/not/leak", MPD_CLUSTER="grace", MPD_ACCOUNT="999",
-                            MPD_PYTHON="/nope/python", MPD_ALLOW_HUB="1", MPD_REQUIRE_CUDA="0").items():
+                            MPD_CKPT_EVERY="100", MPD_STRUCTURE_LEGACY_MASK="1", MPD_HOME="/should/not/leak", MPD_CLUSTER="grace",
+                            MPD_ACCOUNT="999", MPD_PYTHON="/nope/python", MPD_ALLOW_HUB="1", MPD_REQUIRE_CUDA="0",
+                            HF_HUB_OFFLINE="0", TRANSFORMERS_OFFLINE="0").items():
         monkeypatch.setenv(name, value)
     plan = make("grace")
     text = render_script(plan, stage(plan, "score-base"))
     exported = {m.group(1): m.group(2) for m in re.finditer(r"^export (MPD_[A-Z0-9_]+)=(\S+)$", text, re.M)}
-    assert exported == {"MPD_3DI_ENGINE": "foldseek", "MPD_CKPT_EVERY": "100", "MPD_DTYPE": "float32", "MPD_FOLDSEEK": "foldseek",
-                        "MPD_KEEP_ALL_CHECKPOINTS": "1", "MPD_MODELS_DIR": f"{tmp_path}/models", "MPD_STRUCTURE_LEGACY_MASK": "1",
-                        "MPD_MODEL_ESM2_650M": f"{tmp_path}/weights/esm2-650m", "MPD_TF32": "1"}
+    assert exported == {"MPD_3DI_ENGINE": "foldseek", "MPD_CKPT_EVERY": "100", "MPD_DTYPE": "float32",
+                        "MPD_FOLDSEEK": f"{tmp_path}/tools/foldseek/bin/foldseek", "MPD_KEEP_ALL_CHECKPOINTS": "1",
+                        "MPD_MODELS_DIR": f"{tmp_path}/models", "MPD_MODEL_ESM2_650M": f"{tmp_path}/weights/esm2-650m", "MPD_TF32": "1"}
+    assert "MPD_STRUCTURE_LEGACY_MASK" not in text                                           # only through --env, see the next test
     for private in ("/should/not/leak", "MPD_CLUSTER", "MPD_ALLOW_HUB", "/nope/python", "MPD_ACCOUNT"):
         assert private not in text, private
     assert text.count("MPD_REQUIRE_CUDA=1") == 1 and "MPD_REQUIRE_CUDA=0" not in text      # the planner decides, not the shell
+    assert "export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 " in text and "HF_HUB_OFFLINE=0" not in text      # jobs stay offline
     assert "#SBATCH --account=123456789012" in text                                           # MPD_ACCOUNT is the cli's default only if no --account
+
+
+def test_the_legacy_mask_and_other_numerics_flags_reach_a_job_through_env(tmp_path):
+    plan = make("grace", home=tmp_path / "home", extra_env={"MPD_STRUCTURE_LEGACY_MASK": "1"})
+    for text in render_all(plan).values():
+        assert "\nexport MPD_STRUCTURE_LEGACY_MASK=1\n" in text
+    run = ScriptRun(tmp_path, plan, "prepare", module=None)
+    assert run.run().returncode == 0 and run.job_env()["MPD_STRUCTURE_LEGACY_MASK"] == "1"
+
+
+def test_a_job_can_not_be_allowed_to_reach_the_hub():
+    with pytest.raises(PlanError, match="MPD_ALLOW_HUB cannot be set for jobs: it is for login nodes and laptops"):
+        make("grace", extra_env={"MPD_ALLOW_HUB": "1"})
 
 
 def test_a_bad_account_in_the_environment_is_named_as_such(monkeypatch):

@@ -109,13 +109,19 @@ def test_resolve_campaign_accepts_a_path_an_id_or_a_unique_prefix(tmp_path):
 
 
 # ---------------------------------------------------------------- Slurm state
+def job_limit(script) -> str:
+    """The --time of a script, which the fake sacct prints as the job's Timelimit."""
+    return next(line.split("=", 1)[1] for line in script.read_text().splitlines() if line.startswith("#SBATCH --time="))
+
+
 def test_job_states_summarises_an_array_in_one_entry(fake_slurm, tmp_path):
     plan = make(tmp_path, units=("a", "b", "c", "d"))
     script = tmp_path / "home" / "runs" / plan.campaign_id / "scripts" / "train.sbatch"
     import subprocess
     out = subprocess.run(["sbatch", "--parsable", str(script)], capture_output=True, text=True).stdout.strip()
     assert out == "1001"
-    assert job_states(["1001"]) == {"1001": campaign.JobState("PENDING", "00:00:00", "0:0", "mpd-train-esm2650m", "4 PENDING")}
+    assert job_states(["1001"]) == {"1001": campaign.JobState("PENDING", "00:00:00", "0:0", "mpd-train-esm2650m", "4 PENDING",
+                                                              limit=job_limit(script), node="")}                # a pending job has no node yet
     fake_slurm.set_state(1001, "RUNNING")
     st = job_states(["1001"])["1001"]
     assert st.state == "RUNNING" and st.detail == "2 RUNNING, 2 PENDING"
@@ -123,6 +129,24 @@ def test_job_states_summarises_an_array_in_one_entry(fake_slurm, tmp_path):
     st = job_states(["1001"])["1001"]
     assert (st.state, st.exitcode) == ("FAILED", "0:0") or st.state == "FAILED"
     assert "2 COMPLETED" in st.detail and "1 FAILED" in st.detail and "1 TIMEOUT" in st.detail
+
+
+def test_job_states_carry_the_time_limit_and_the_node(fake_slurm):
+    job = fake_slurm.add_job(name="train", state="RUNNING")
+    fake_slurm.set_state(job, "TIMEOUT", elapsed="01:00:07", exitcode="0:15", node="g003")
+    st = job_states([job])[job]
+    assert (st.state, st.elapsed, st.exitcode, st.node) == ("TIMEOUT", "01:00:07", "0:15", "g003") and st.limit == ""    # no --time: Partition_Limit
+    pending = fake_slurm.add_job(name="later", state="PENDING")
+    assert job_states([pending])[pending].node == ""                                  # sacct prints "None assigned"
+
+
+def test_a_sacct_that_refuses_the_extra_columns_still_gives_the_states(fake_slurm):
+    job = fake_slurm.add_job(name="train", state="RUNNING")
+    fake_slurm.sacct_fails(calls=[1])                                                   # the first call (with Timelimit, NodeList) fails
+    st = job_states([job])[job]
+    assert st.state == "RUNNING" and st.limit == "" and st.node == ""
+    sacct = [c.argv[-1] for c in fake_slurm.calls("sacct")]
+    assert sacct == [f"--format={campaign.SACCT_FIELDS}", f"--format={campaign.SACCT_FIELDS_BASIC}"]
 
 
 def test_job_states_ignores_unknown_ids_and_empty_input(fake_slurm):
@@ -161,6 +185,17 @@ def test_pending_reasons_name_why_a_job_waits(fake_slurm):
     assert pending_reasons([c]) == {}
     fake_slurm.squeue_fails()
     assert pending_reasons([a]) == {}
+
+
+def test_pending_reasons_can_include_the_reason_squeue_keeps_for_an_ended_job(fake_slurm):
+    timed_out = fake_slurm.add_job(name="a", state="RUNNING")
+    cancelled = fake_slurm.add_job(name="b", state="PENDING")
+    plain = fake_slurm.add_job(name="c", state="RUNNING")
+    fake_slurm.set_state(timed_out, "TIMEOUT", reason="TimeLimit")
+    fake_slurm.set_state(cancelled, "CANCELLED", reason="DependencyNeverSatisfied")
+    fake_slurm.set_state(plain, "COMPLETED")
+    assert pending_reasons([timed_out, cancelled, plain]) == {}
+    assert pending_reasons([timed_out, cancelled, plain], any_state=True) == {timed_out: "TimeLimit", cancelled: "DependencyNeverSatisfied"}
 
 
 # ---------------------------------------------------------------- progress and logs
@@ -393,7 +428,7 @@ def test_ids_read_from_a_marker_can_never_become_scancel_or_sacct_options(fake_s
         cancel(plan.campaign_dir, echo=lambda *_: None)
     assert fake_slurm.calls("scancel") == [] and job_states(["--all", "1; rm", "12"], sacct="sacct") == {}
     assert campaign.scancel_ids(["-u", "--name=x"]) == (True, "") and fake_slurm.calls("scancel") == []
-    assert [c.argv for c in fake_slurm.calls("sacct")] == [["-X", "-n", "-P", "-j", "12", "--format=JobID,JobName,State,Elapsed,ExitCode"]]
+    assert [c.argv for c in fake_slurm.calls("sacct")] == [["-X", "-n", "-P", "-j", "12", f"--format={campaign.SACCT_FIELDS}"]]
 
 
 def test_cancel_refuses_a_directory_that_is_not_a_campaign(tmp_path):

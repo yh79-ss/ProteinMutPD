@@ -14,7 +14,7 @@ pytest.importorskip("peft")
 
 import torch
 
-from fx_saprot import fake_foldseek, make_tiny_saprot, tiny_saprot_models, write_tiny_structure_home  # noqa: F401
+from fx_saprot import fake_foldseek, make_tiny_saprot, no_network, tiny_saprot_models, write_tiny_structure_home  # noqa: F401
 from mpd import students
 from mpd.contexts import ContextTable, build_table, sequence_hash
 from mpd.data.benchmarks import open_benchmark
@@ -203,6 +203,45 @@ def test_lora_parameters_and_the_adapter_round_trip(env, tmp_path):
     assert again.trainable() == []
     with pytest.raises(ValueError, match="either lora"):
         Saprot("saprot-35m", CPU, lora={"rank": 8, "alpha": 16}, adapter=tmp_path / "ckpt")
+
+
+def test_saving_and_reloading_an_adapter_needs_no_network(env, tmp_path, no_network):
+    """The base model is named by its Hub id, so PEFT would ask huggingface.co about its config unless told not to."""
+    student, table = loaded(["MKVLAGDEWQRS"], ["pynwrqhgd#lv"], [(0, 1), (0, 6)], lora={"rank": 8, "alpha": 16})
+    student.save_adapter(tmp_path / "ckpt")
+    again, _ = loaded(["MKVLAGDEWQRS"], ["pynwrqhgd#lv"], [(0, 1), (0, 6)], adapter=tmp_path / "ckpt")
+    assert again.trainable() == [] and no_network == []
+
+
+def test_adapters_trained_on_the_pinned_weights_record_the_commit(env, tmp_path, monkeypatch, no_network):
+    from mpd import registry
+    from mpd.data import models
+    monkeypatch.delenv("MPD_MODEL_SAPROT_35M")
+    monkeypatch.setattr(models, "resolve", lambda key, home=None: str(env["student"]))     # as if the fetched folder were this one
+    student, _ = loaded(["MKVLAGDEWQRS"], ["pynwrqhgd#lv"], [(0, 1)], lora={"rank": 8, "alpha": 16})
+    student.save_adapter(tmp_path / "ckpt")
+    config = json.loads((tmp_path / "ckpt" / "adapter_config.json").read_text())
+    info = registry.get("saprot-35m")
+    assert (config["base_model_name_or_path"], config["revision"]) == (info.hf_id, info.revision)
+    assert str(env["student"]) not in (tmp_path / "ckpt" / "README.md").read_text() and no_network == []
+
+
+def test_the_opt_in_hub_route_asks_for_the_pinned_revision(tmp_path, monkeypatch):
+    import transformers
+    from mpd import registry
+    seen = []
+
+    def spy(cls, path, **kwargs):
+        seen.append((path, kwargs))
+        raise KeyError("stop after the first call")
+    monkeypatch.delenv("MPD_MODEL_SAPROT_35M", raising=False)
+    monkeypatch.setenv("MPD_ALLOW_HUB", "1")
+    monkeypatch.setenv("MPD_HOME", str(tmp_path))
+    monkeypatch.setattr(transformers.AutoModelForMaskedLM, "from_pretrained", classmethod(spy))
+    with pytest.raises(KeyError):
+        Saprot("saprot-35m", CPU)
+    info = registry.get("saprot-35m")
+    assert seen[0][0] == info.hf_id and seen[0][1]["revision"] == info.revision and seen[0][1]["hidden_dropout_prob"] == 0.0
 
 
 def test_a_structure_set_is_required_and_scoped_views_are_honoured(env):

@@ -4,6 +4,7 @@ Campaign layout (all under <home>/runs/<campaign_id>/):
 
     spec.json resolved.json plan.json tasks/<stage>.json scripts/ logs/ SUBMITTED.json   written by `mpd submit`
     contexts/union.*  contexts/unit__<unit>.*  contexts/eval__<dataset>[__<unit>].*   prepare
+    contexts/structures.json                                                           prepare, only if a model reads structure
     teacher/{logits.npy,COMPLETE.json}                                                 teacher
     train/<unit>/{CONFIG.json,dev_curve.jsonl,train_steps.csv,checkpoint_*/,SELECTED.json,COMPLETE.json}
     train/<unit>.partial/{trainable.pt,optimizer.pt,STATE.json}                        train, until the unit is complete
@@ -29,6 +30,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from .. import registry
 from ..data.benchmarks import Benchmark, open_benchmark
 from ..spec import RunSpec
 
@@ -190,6 +192,9 @@ class Campaign:
     def stem_eval_for(self, unit: str, dataset: str) -> Path:
         return self.stem_eval(dataset, unit if self.evaluated_on_own_assay(unit, dataset) else None)
 
+    def stem_structures(self) -> Path:
+        return self.root / "contexts" / "structures.json"
+
     @property
     def teacher_logits(self) -> Path:
         return self.root / "teacher" / "logits.npy"
@@ -207,6 +212,39 @@ class Campaign:
     @property
     def evaluate_dir(self) -> Path:
         return self.root / "evaluate"
+
+    # -- structures (SaProt) ----------------------------------------------------
+    def needs_structure(self, role: str) -> bool:
+        """Does the campaign's "teacher" or "student" read protein structure?"""
+        return registry.get(getattr(self.spec, role)).needs_structure
+
+    def load_structures(self, dataset: str | None = None):
+        """contexts/structures.json as `dataset` sees it, or None if `prepare` wrote none.
+
+        Name the dataset: a sequence two benchmarks share has a string in each, and `None` gives the base set (the
+        training dataset's), which is wrong for scoring any other dataset."""
+        if not self.stem_structures().is_file():
+            return None
+        from ..structure.set import StructureSet
+        return StructureSet.load(self.stem_structures()).scoped(dataset)
+
+    def structures_digest(self) -> str | None:
+        """Digest of structures.json as `prepare` froze it (the one MANIFEST.json records), None if there is none."""
+        if not self.stem_structures().is_file():
+            return None
+        from ..structure.set import StructureSet
+        return StructureSet.load(self.stem_structures()).digest()
+
+    def structures_for(self, role: str, dataset: str):
+        """What `model.encode` takes for `role`: the structure strings of `dataset` if that model reads structure, else None."""
+        if not self.needs_structure(role):
+            return None
+        structures = self.load_structures(dataset)
+        if structures is None:
+            raise FileNotFoundError(f"{getattr(self.spec, role)} reads protein structure, but {self.stem_structures()} does not "
+                                    f"exist. The prepare stage writes it: delete {self.root / 'contexts' / 'MANIFEST.json'} and "
+                                    "repeat your `mpd submit` command with --force to run that stage again.")
+        return structures
 
     # -- score shards ---------------------------------------------------------
     @functools.cached_property

@@ -400,7 +400,7 @@ def test_large_arrays_are_chunked_under_the_slurm_limit():
     assert [s.task_offset for s in plan.stages if s.name == "score"] == [0, 1000]
 
 
-# ---------------------------------------------------------------- campaign identity and nonce (C9, D2)
+# ---------------------------------------------------------------- campaign identity and nonce (C9 as amended by CONTRACTS 9.2, D2)
 ID = re.compile(r"^(?P<spec>.+)__(?P<hash>[0-9a-f]{8})$")
 
 
@@ -415,38 +415,66 @@ def changed(**kw):
     return make(**kw).campaign_id
 
 
-BASE_ID = make("grace").campaign_id
+BASE = make("grace")
+BASE_ID = BASE.campaign_id
 
-
-@pytest.mark.parametrize("what,kw", [
+# What can change a result, or where results are written: a different value is a different campaign (it trains again).
+RESULT_OPTIONS = [
     ("eval data", dict(spec_kw=dict(eval_data=("proteingym",)))),
     ("another eval dataset", dict(spec_kw=dict(eval_data=("venusmuthub",)))),
     ("cluster", dict(cluster="vision")),
     ("gpu", dict(gpu="a40")),
     ("score shards", dict(score_shards={"proteingym": 2})),
-    ("array throttle", dict(array_throttle=3)),
+    ("training width", dict(spec_kw=dict(train_gpus=2))),
+    ("seed", dict(spec_kw=dict(seed=7))),
+    ("MPD_DTYPE", dict(extra_env={"MPD_DTYPE": "float32"})),
+    ("MPD_TF32", dict(extra_env={"MPD_TF32": "1"})),
+    ("MPD_STRUCTURE_LEGACY_MASK", dict(extra_env={"MPD_STRUCTURE_LEGACY_MASK": "1"})),
+]
+# Where and when a job runs, and who pays: the same campaign (CONTRACTS 9.2), so that a recovery reuses finished work.
+SCHEDULING_OPTIONS = [
     ("train time", dict(train_time="08:00:00")),
     ("score time", dict(score_time="01:00:00")),
     ("teacher time", dict(teacher_time="01:00:00")),
+    ("array throttle", dict(array_throttle=3)),
     ("extra sbatch", dict(extra_sbatch=("--exclude=g001",))),
-    ("extra env", dict(extra_env={"NCCL_DEBUG": "INFO"})),
     ("extra modules", dict(extra_modules=("WebProxy",))),
-    ("training width", dict(spec_kw=dict(train_gpus=2))),
-    ("seed", dict(spec_kw=dict(seed=7))),
-])
-def test_everything_that_changes_tasks_or_scripts_changes_the_id(what, kw):
-    assert changed(**kw) != BASE_ID, what
-
-
-@pytest.mark.parametrize("what,kw", [
+    ("extra env", dict(extra_env={"FOO": "1"})),
+    ("extra env that is no numerics variable of ours", dict(extra_env={"NCCL_DEBUG": "INFO", "MPD_KEEP_ALL_CHECKPOINTS": "1"})),
+    ("all of them at once", dict(train_time="09:00:00", score_time="01:30:00", teacher_time="02:00:00", array_throttle=2,
+                                 extra_sbatch=("--exclude=g002", "--mail-type=END"), extra_modules=("WebProxy",), extra_env={"FOO": "bar"})),
     ("python", dict(python="/elsewhere/bin/python")),
     ("home", dict(home="/other/home")),
     ("account", dict(account="another_acct")),
     ("no account", dict(account=None)),
     ("nonce", dict(nonce="ffffffffffff")),
-])
-def test_moving_or_re_pointing_a_campaign_keeps_its_id(what, kw):
+]
+
+
+@pytest.mark.parametrize("what,kw", RESULT_OPTIONS, ids=[w for w, _ in RESULT_OPTIONS])
+def test_what_can_change_a_result_changes_the_id(what, kw):
+    assert changed(**kw) != BASE_ID, what
+
+
+@pytest.mark.parametrize("what,kw", SCHEDULING_OPTIONS, ids=[w for w, _ in SCHEDULING_OPTIONS])
+def test_scheduling_options_and_locations_keep_the_id(what, kw):
     assert changed(**kw) == BASE_ID, what
+
+
+@pytest.mark.parametrize("what,kw", SCHEDULING_OPTIONS, ids=[w for w, _ in SCHEDULING_OPTIONS])
+def test_nothing_a_campaign_directory_keeps_depends_on_a_scheduling_option(what, kw):
+    """`--force` rewrites only the scripts and plan.json, so spec.json, resolved.json and tasks/ must come out equal."""
+    plan = make(**kw)
+    assert plan.spec.to_json() == BASE.spec.to_json() and plan.resolved == BASE.resolved
+    assert [(s.full_name, s.tasks, s.task_offset) for s in plan.stages] == [(s.full_name, s.tasks, s.task_offset) for s in BASE.stages]
+    assert [s.depends_on for s in plan.stages] == [s.depends_on for s in BASE.stages]
+
+
+def test_scheduling_options_do_reach_the_scripts_of_the_same_campaign():
+    plan = make("grace", train_time="09:00:00", array_throttle=2, extra_sbatch=("--exclude=g002",), spec_kw=dict(method="direct-one"))
+    assert plan.campaign_id == make("grace", spec_kw=dict(method="direct-one")).campaign_id
+    text = render_script(plan, stage(plan, "train"))
+    assert "#SBATCH --time=09:00:00" in text and "#SBATCH --array=0-2%2" in text and "#SBATCH --exclude=g002" in text
 
 
 def test_the_default_shard_count_is_not_a_change():
@@ -464,12 +492,35 @@ def test_the_numerics_variables_are_part_of_the_identity(monkeypatch):
     monkeypatch.setenv("MPD_TF32", "1")
     assert changed() != BASE_ID
     monkeypatch.delenv("MPD_TF32")
-    monkeypatch.setenv("MPD_STRUCTURE_LEGACY_MASK", "1")
-    assert changed() != BASE_ID
-    monkeypatch.delenv("MPD_STRUCTURE_LEGACY_MASK")
     monkeypatch.setenv("MPD_MODEL_ESM2_650M", "/weights/here")                            # where weights are is not what is computed
     monkeypatch.setenv("MPD_ACCOUNT", "env_acct_3")
+    monkeypatch.setenv("MPD_CKPT_EVERY", "50")
+    monkeypatch.setenv("MPD_KEEP_ALL_CHECKPOINTS", "1")
     assert changed() == BASE_ID
+
+
+def test_a_flag_that_is_off_is_not_a_change():
+    """The code reads MPD_TF32 and MPD_STRUCTURE_LEGACY_MASK as "== 1" and MPD_DTYPE as "if set": nothing else differs."""
+    for env in ({"MPD_TF32": "0"}, {"MPD_TF32": ""}, {"MPD_STRUCTURE_LEGACY_MASK": "0"}, {"MPD_DTYPE": ""}):
+        assert changed(extra_env=env) == BASE_ID, env
+    assert changed(extra_env={"MPD_DTYPE": "bfloat16"}) != BASE_ID and changed(extra_env={"MPD_DTYPE": "float16"}) != changed(
+        extra_env={"MPD_DTYPE": "bfloat16"})
+
+
+def test_the_legacy_mask_reaches_a_job_only_through_env(monkeypatch):
+    """It reproduces an earlier, wrong input and changes results: a stale export in a shell must not reach a campaign."""
+    monkeypatch.setenv("MPD_STRUCTURE_LEGACY_MASK", "1")
+    plan = make("grace")
+    assert plan.campaign_id == BASE_ID and "MPD_STRUCTURE_LEGACY_MASK" not in "".join(render_all(plan).values())
+    assert any("MPD_STRUCTURE_LEGACY_MASK is set in this shell but jobs do not inherit it" in w and "--env" in w for w in plan.warnings)
+    via_env = make("grace", extra_env={"MPD_STRUCTURE_LEGACY_MASK": "1"})
+    assert via_env.campaign_id != BASE_ID and not any("MPD_STRUCTURE_LEGACY_MASK" in w for w in via_env.warnings)
+    assert all("export MPD_STRUCTURE_LEGACY_MASK=1\n" in text for text in render_all(via_env).values())
+    monkeypatch.setenv("MPD_STRUCTURE_LEGACY_MASK", "0")                                  # off is off: nothing to warn about
+    assert not any("MPD_STRUCTURE_LEGACY_MASK" in w for w in make("grace").warnings)
+    monkeypatch.delenv("MPD_STRUCTURE_LEGACY_MASK")
+    assert not any("MPD_STRUCTURE_LEGACY_MASK" in w for w in make("grace").warnings)
+    assert "MPD_STRUCTURE_LEGACY_MASK" not in planner.FORWARDED_ENV and "MPD_STRUCTURE_LEGACY_MASK" in planner._NUMERICS_ENV
 
 
 def test_the_nonce_is_per_plan():
@@ -559,6 +610,21 @@ def test_env_pair_parser():
                          ("A=x\ny", "one line")]:
         with pytest.raises(PlanError, match=message):
             parse_env_pair(bad)
+
+
+def test_path_variables_of_the_shell_become_absolute_and_those_of_env_must_already_be(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    for name, value in dict(MPD_FOLDSEEK="bin/foldseek", MPD_MODELS_DIR="models", MPD_MODEL_ESM2_8M="~/w", MPD_3DI_ENGINE="foldseek").items():
+        monkeypatch.setenv(name, value)
+    got = planner.forwarded_env()
+    assert got["MPD_FOLDSEEK"] == str(tmp_path / "bin" / "foldseek") and got["MPD_MODELS_DIR"] == str(tmp_path / "models")
+    assert got["MPD_MODEL_ESM2_8M"] == str(Path("~/w").expanduser()) and got["MPD_3DI_ENGINE"] == "foldseek"      # an engine name is no path
+    monkeypatch.setenv("MPD_FOLDSEEK", "")
+    assert planner.forwarded_env()["MPD_FOLDSEEK"] == ""                                                         # empty stays empty, it is not the current folder
+    for name in ("MPD_FOLDSEEK", "MPD_MODELS_DIR", "MPD_MODEL_ESM2_650M"):
+        with pytest.raises(PlanError, match=f"--env {name}=rel/x is a relative path"):
+            make("grace", extra_env={name: "rel/x"})
+    assert make("grace", extra_env={"MPD_FOLDSEEK": "/opt/foldseek/bin/foldseek", "MPD_3DI_ENGINE": "biotite"}).options.extra_env
 
 
 def test_account_warning_only_where_accounts_are_billed():

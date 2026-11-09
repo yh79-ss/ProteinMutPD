@@ -64,14 +64,15 @@ MODELS: dict[str, ModelInfo] = {m.key: m for m in [
     ModelInfo("esm2-3b", "esm2", "facebook/esm2_t36_3B_UR50D", 3000, ("student", "teacher"), act_gb=27,
               revision="476b639933c8baad5ad09a60ac1a87f987b656fc", license="MIT"),
     ModelInfo("saprot-35m", "saprot", "westlake-repl/SaProt_35M_AF2", 35, ("student", "teacher"),
-              status="planned", needs_structure=True, act_gb=3,
+              needs_structure=True, act_gb=3,
               revision="316cd4017d29f4657b959365f24b57f1ee278912", license="MIT",
-              note="Planned: needs the Foldseek 3Di structure inputs, not written yet."),
+              note="Reads protein structure (Foldseek 3Di). VenusMutHub needs a structure set that is not "
+                   "published yet."),
     ModelInfo("saprot-650m", "saprot", "westlake-repl/SaProt_650M_AF2", 650, ("student", "teacher"),
-              status="planned", needs_structure=True, act_gb=12,
+              needs_structure=True, act_gb=12,
               revision="d9b9ad00ef61c0990e611b2b43f2231c7de24b38", license="MIT",
-              note="Planned: sequence + Foldseek 3Di tokens, pLDDT<70 masked; the structure inputs are not "
-                   "written yet."),
+              note="Reads protein structure (Foldseek 3Di; pLDDT<70 masked). VenusMutHub needs a structure set "
+                   "that is not published yet."),
     # AIDO is registered only so that `mpd models` and the planner can explain why it is not offered. v0.1 has no
     # AIDO student/teacher module, `mpd fetch` has no AIDO source, and nothing from GenBio is shipped. Facts for a
     # later port (this project's own runs, 2026-09): bf16 weights 32.13 GB; a 12,800-token full-MSA teacher forward

@@ -61,14 +61,28 @@ def test_status_with_no_campaigns_and_with_no_home(capsys, cli_env):
     assert rc == 2 and "give --home" in err
 
 
+def table_rows(out: str) -> dict[str, list[str]]:
+    """The status table: stage -> its whitespace-separated fields (the block under the `stage state elapsed reason` header)."""
+    lines = out.splitlines()
+    first = next(i for i, ln in enumerate(lines) if ln.split()[:4] == ["stage", "state", "elapsed", "reason"])
+    block = []
+    for ln in lines[first + 1:]:
+        if not ln.strip():
+            break
+        block.append(ln.split())
+    return {fields[0]: fields for fields in block}
+
+
 def test_status_shows_slurm_state_progress_and_why_a_job_waits(capsys, running):
     plan, ids = running
     rc, out, err = status(capsys, plan)
     assert rc == 0, err
-    rows = {line.split()[0]: line for line in out.splitlines() if line.split() and line.split()[0] in ids}
-    assert "COMPLETED" in rows["prepare"] and "00:03:11" in rows["prepare"] and "1/1 done" in rows["prepare"]
-    assert "RUNNING" in rows["train"] and "0/1 done" in rows["train"]
-    assert "PENDING" in rows["score"] and "waiting: Dependency" in rows["score"]
+    rows = table_rows(out)
+    assert list(rows) == [s.full_name for s in plan.stages] and all(rows[s][4] == ids[s] for s in rows)         # job column
+    assert rows["prepare"][:4] == ["prepare", "COMPLETED", "00:03:11", "-"] and rows["prepare"][6] == "1/1"
+    assert rows["train"][:4] == ["train", "RUNNING", "01:10:00", "-"] and rows["train"][6] == "0/1"
+    assert rows["score"][:4] == ["score", "PENDING", "00:00:00", "Dependency"]
+    assert "waiting:" in out and "score       Dependency: it waits for train to finish. Nothing to do." in out
     assert "state      submitted" in out
     assert "next:" in out and "mpd logs" in out and "train" in out.split("next:")[1]
 

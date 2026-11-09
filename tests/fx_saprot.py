@@ -192,6 +192,42 @@ def write_tiny_structure_home(home: Path, *, b: float = 90.0, ranges: bool = Tru
     return seqs
 
 
+def write_tiny_venus(home: Path, assays: dict[str, str], *, low: int = 0, b: float = 90.0,
+                     structures: bool = True) -> dict[str, str]:
+    """A VenusMutHub stand-in with its structure set, in the layout `mpd fetch venusmuthub` / `venus-structures` produce.
+
+    `assays` maps an assay id to its wild-type sequence; every distinct sequence gets one AlphaFold-DB-style model (pLDDT 0-100
+    in the B-factor column, `b` everywhere except the first `low` residues at 50, which `prepare` therefore masks). A sequence
+    that tiny ProteinGym also holds thus gets a different string here than there. Returns {assay id: protein id}.
+    `structures=False` writes the assay files only, as after `mpd fetch venusmuthub` and before the structure set is fetched.
+    """
+    from mpd.data import venus_structures as vs
+    from mpd.data.sources import VENUS_STRUCTURES, VENUSMUTHUB
+    data, root = home / "data" / VENUSMUTHUB.dirname, home / "data" / VENUS_STRUCTURES.dirname
+    ids, rows = {}, {}
+    for number, (aid, seq) in enumerate(sorted(assays.items())):
+        pid = vs.protein_id_for(seq)
+        ids[aid] = pid
+        csv_rows = []
+        for k, pos in enumerate(range(3, 11)):                         # 1-based positions 3..10, each mutated once
+            mt = "A" if seq[pos - 1] != "A" else "G"
+            csv_rows.append((f"{seq[pos - 1]}{pos}{mt}", seq[:pos - 1] + mt + seq[pos:], f"{((k * 7 + number) % 11) / 10:.1f}"))
+        folder = data / "single_mutant" / "stability"
+        folder.mkdir(parents=True, exist_ok=True)
+        with open(folder / f"{aid}.csv", "w", newline="") as fh:
+            w = csv.writer(fh)
+            w.writerow(["mutant", "mutated_sequence", "fitness_score"])
+            w.writerows(csv_rows)
+        if structures and pid not in rows:
+            relative = f"structures/alphafold_db/{pid}.pdb"
+            path = write_pdb(root / relative, seq, [50.0] * low + [b] * (len(seq) - low))
+            rows[pid] = {"protein_id": pid, "sequence_sha256": vs.sequence_sha256(seq), "length": len(seq), "source": "alphafold_db",
+                         "chain": "A", "confidence_scale": "percent_0_to_100", "file": relative, "file_sha256": vs.sha256_file(path)}
+    if structures:
+        vs.write_manifest(list(rows.values()), root / vs.MANIFEST_NAME)
+    return ids
+
+
 # -- tiny SaProt models -----------------------------------------------------------------------------------------
 
 def make_tiny_saprot(folder: Path, seed: int, dropout: float = 0.1) -> Path:
@@ -214,6 +250,28 @@ def make_tiny_saprot(folder: Path, seed: int, dropout: float = 0.1) -> Path:
 def tiny_saprot_models(tmp_path_factory):
     root = tmp_path_factory.mktemp("tiny_saprot")
     return {"student": make_tiny_saprot(root / "student", seed=1), "teacher": make_tiny_saprot(root / "teacher", seed=2)}
+
+
+@pytest.fixture
+def no_network(monkeypatch):
+    """Every attempt to open a connection is recorded and refused, as on a compute node; returns the list of attempts."""
+    import socket
+    attempts = []
+
+    def refuse(*args, **kwargs):
+        attempts.append(args)
+        raise OSError("no network in this test")
+
+    try:                                                    # a keep-alive connection an earlier test left open would hide an attempt
+        from huggingface_hub.utils import reset_sessions
+        reset_sessions()
+    except ImportError:
+        pass
+    monkeypatch.setattr(socket.socket, "connect", refuse)
+    monkeypatch.setattr(socket, "getaddrinfo", refuse)
+    for name in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE"):
+        monkeypatch.delenv(name, raising=False)            # the point is that no offline switch is needed
+    return attempts
 
 
 # -- a local HTTP server for download tests ----------------------------------------------------------------------

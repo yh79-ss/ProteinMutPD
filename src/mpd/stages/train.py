@@ -4,7 +4,9 @@ The loss reads only the teacher table and, for the score objective, which varian
 label is read anywhere in this stage; checkpoints are chosen on a position-held-out development split of the
 teacher targets.
 
-A job killed by its walltime is resumed by running the stage again: see "resumable state" below.
+A job killed by its walltime is resumed by running the stage again: see "resumable state" below. A student that reads
+protein structure (SaProt) is given the strings `prepare` froze in contexts/structures.json; their digest is part of the
+run's configuration, so a checkpoint made with other strings is not resumed.
 """
 
 from __future__ import annotations
@@ -383,20 +385,25 @@ def load_teacher(c: Campaign, table: ContextTable, device) -> tuple[torch.Tensor
     """Teacher logits of the unit's contexts, once COMPLETE.json confirms they belong to this campaign's union table."""
     info, why = teacher_state(c, ContextTable.load(c.stem_union()))
     if info is None:
+        first = f"delete {c.teacher_complete} and " if c.teacher_complete.is_file() else ""
         raise RuntimeError(f"the teacher output cannot be used for this campaign: {why}. Run the teacher stage again (it "
-                           f"recomputes when the contexts or the teacher differ; `mpd submit` with --force re-queues every stage). "
-                           f"The record is {c.teacher_complete}.")
+                           f"recomputes when its contexts, its teacher or its structure strings differ): {first}repeat your "
+                           f"`mpd submit` command with --force, which queues the stages whose output is missing and keeps "
+                           f"the finished ones.")
     logits = np.load(c.teacher_logits, mmap_mode="r")[table.union_index]
     return torch.as_tensor(logits, dtype=torch.float32, device=device), info["logits_sha256"]
 
 
 def config_record(c: Campaign, unit: str, table: ContextTable, train_rows, dev_rows, monitors, world: int,
                   teacher_sha: str, dtype: str) -> dict:
-    return {"unit": unit, "student": c.spec.student, "teacher": c.spec.teacher, "objective": c.spec.objective,
-            "train_contexts": int(len(train_rows)), "dev_contexts": int(len(dev_rows)),
-            "variants": None if table.var_mt is None else int(len(table.var_mt)), "world_size": world,
-            "monitors": sorted(monitors), "context_digest": table.digest(), "teacher_logits_sha256": teacher_sha,
-            "dtype": dtype, "dms_labels_opened": False, **c.resolved}
+    record = {"unit": unit, "student": c.spec.student, "teacher": c.spec.teacher, "objective": c.spec.objective,
+              "train_contexts": int(len(train_rows)), "dev_contexts": int(len(dev_rows)),
+              "variants": None if table.var_mt is None else int(len(table.var_mt)), "world_size": world,
+              "monitors": sorted(monitors), "context_digest": table.digest(), "teacher_logits_sha256": teacher_sha,
+              "dtype": dtype, "dms_labels_opened": False, **c.resolved}
+    if c.needs_structure("student"):               # other strings are another run: this goes into the resume digest
+        record["structures_digest"] = c.structures_digest()
+    return record
 
 
 def train_unit(c: Campaign, unit: str, rank: int, world: int, local_rank: int, device, every: int, on_update) -> None:
@@ -409,6 +416,7 @@ def train_unit(c: Campaign, unit: str, rank: int, world: int, local_rank: int, d
         torch.cuda.manual_seed_all(spec.seed)
 
     table = ContextTable.load(c.stem_unit(unit))
+    structures = c.structures_for("student", spec.train_data)        # None for a student that reads sequence only
     teacher, teacher_sha = load_teacher(c, table, device)
     dev = table.dev_mask(r["dev_fraction"])
     train_rows, dev_rows = np.flatnonzero(~dev), np.flatnonzero(dev)
@@ -416,7 +424,7 @@ def train_unit(c: Campaign, unit: str, rank: int, world: int, local_rank: int, d
         raise RuntimeError(f"unit {unit}: {len(train_rows)} training and {len(dev_rows)} development contexts; need both")
 
     model = students.load(spec.student, device, lora={"rank": r["lora_rank"], "alpha": r["lora_alpha"]})
-    model.encode(table)
+    model.encode(table, structures)
     trainable = model.trainable()
     if not trainable:
         raise RuntimeError("no trainable LoRA parameters")

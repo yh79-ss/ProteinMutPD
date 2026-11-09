@@ -21,7 +21,7 @@ from .data.fetch import TimeBudgetReached, fetch_source
 from .results import table
 from .slurm.cluster import Cluster, ClusterError, available_clusters
 from .slurm.plan import PlanOptions, default_python, describe, make_plan, parse_env_pair, parse_score_shards
-from .slurm.submit import submit, write_campaign
+from .slurm.submit import FORCE_APPLIES, submit, write_campaign
 from .spec import RunSpec
 
 DEFAULT_MAX_SU = 10_000
@@ -105,7 +105,10 @@ def _recipe_args(p: argparse.ArgumentParser) -> None:
     r.add_argument("--kl-weight", type=_nonnegative_float)
     r.add_argument("--dev-fraction", type=float)
 
-    c = p.add_argument_group("cluster")
+    c = p.add_argument_group("cluster", "Another --cluster, --gpu, --train-gpus or --score-shards (and another --eval-data) is another campaign "
+                                        "that computes everything again. The walltimes, --array-throttle, --account, --home and --python only decide "
+                                        "where and when the jobs run: they keep the campaign, and `mpd submit --force` applies them to the stages "
+                                        "it queues again (after a TIMEOUT, a longer --train-time).")
     c.add_argument("--cluster", default=os.environ.get("MPD_CLUSTER"),
                    help=f"profile ({', '.join(available_clusters())}) or YAML path (default: $MPD_CLUSTER)")
     c.add_argument("--account", help="billing account (Grace: the number `myproject` prints). Default: $MPD_ACCOUNT, then "
@@ -124,7 +127,8 @@ def _recipe_args(p: argparse.ArgumentParser) -> None:
     c.add_argument("--allow-unsupported-gpu", action="store_true",
                    help="train on a GPU without native bf16 (Grace rtx, t4) in float32 instead of refusing")
 
-    j = p.add_argument_group("job script (repeatable)")
+    j = p.add_argument_group("job script (repeatable)", "These keep the campaign, except MPD_DTYPE, MPD_TF32 and MPD_STRUCTURE_LEGACY_MASK, which "
+                                                         "change results and so start their own. After a bad node: --sbatch-arg=--exclude=NODE and --force.")
     j.add_argument("--env", action="append", default=[], metavar="K=V", help="export K=V in every job script")
     j.add_argument("--module", action="append", default=[], metavar="M", help="also `module load` M in every job script")
     j.add_argument("--sbatch-arg", action="append", default=[], metavar="ARG",
@@ -161,7 +165,8 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--yes", action="store_true", help="do not ask for confirmation")
     p.add_argument("--force", action="store_true",
                    help="continue or repair a campaign that was already submitted: queued, running and finished stages are kept and missing ones "
-                        "are queued (to run it again from scratch change --seed)")
+                        "are queued, with the walltimes and sbatch options of this command (a longer --train-time after a TIMEOUT, "
+                        "--sbatch-arg=--exclude=NODE after a bad node). To run it again from scratch change --seed")
 
     p = add("status", cmd_status, "list campaigns, or show the Slurm state, progress and failures of one")
     p.add_argument("campaign", nargs="?", help="campaign directory, id or unique id prefix (default: list them all)")
@@ -329,13 +334,17 @@ def _already_submitted(name: str, state) -> str:
         return (f"{state.message or 'the SUBMITTED.json of this campaign cannot be read'}. Something may be queued: look at "
                 f"`squeue -u $USER` before doing anything else. Nothing was written.")
     queued = ", ".join(f"{stage} {job}" for stage, job in state.jobs.items()) or "none recorded"
+    applies = textwrap.fill(FORCE_APPLIES, width=100, initial_indent=" " * 6, subsequent_indent=" " * 6,
+                            break_long_words=False, break_on_hyphens=False)
     if state.state == "partial":
         return (f"campaign {name} was only partly submitted (queued: {queued}). Nothing was written.\n"
                 f"  mpd status {name}    see what is queued\n  mpd cancel {name}    cancel it\n"
-                "  add --force to this command to continue the chain (the stages not yet queued are submitted)")
+                f"  add --force to this command to continue the chain: the stages not yet queued are submitted\n{applies}")
     return (f"campaign {name} was already submitted (jobs: {queued}). Nothing was written.\n"
-            f"  mpd status {name}    follow it\n  mpd cancel {name}    stop it\n"
-            "  add --force to this command to submit it again (stages that already finished their work skip it)\n"
+            f"  mpd status {name}    follow it\n"
+            f"  mpd cancel {name}    stop its queued and running jobs; after that the same command submits it again (finished stages are kept)\n"
+            "  add --force to this command to continue or repair it: stages that are queued, running or finished are kept and the "
+            f"others are queued\n{applies}\n"
             "  or change --seed for an independent run")
 
 
@@ -411,20 +420,97 @@ def _list_campaigns(args, api) -> int:
     return 0
 
 
+BAD_STATES = (*FAILURE_STATES, "CANCELLED")
+
+
+def _word(value) -> str:
+    """A field of the status table as one word: runs of spaces and commas become '_', nothing becomes '-'."""
+    return re.sub(r"[\s,]+", "_", str(value or "").strip().strip("()")).strip("_") or "-"
+
+
+def _wrapped(text: str, indent: int = 2) -> str:
+    width = max(70, min(shutil.get_terminal_size((110, 24)).columns, 120))
+    return textwrap.fill(text, width=width, initial_indent=" " * indent, subsequent_indent=" " * (indent + 2),
+                         break_long_words=False, break_on_hyphens=False)         # never split --sbatch-arg: people paste these
+
+
+def _advice_block(said: list[str]) -> list[str]:
+    """What happened at the margin, what to do under it."""
+    return [_wrapped(said[0])] + [_wrapped(x, 4) for x in said[1:]] if said else []
+
+
 def _next_steps(ref: str, state: str, failed: str | None, states: dict, jobs: dict, have_results: bool) -> list[str]:
     if state == "partial":
         return [f"mpd cancel {ref}    cancel the jobs that were queued", "repeat your mpd submit command with --force to continue the chain"]
-    if state in ("cancelled", "failed"):
+    if state == "cancelled":
+        return ["this campaign was cancelled: repeat your mpd submit command, with any option you want to change, to queue it again; stages that already finished are kept"]
+    if state == "failed":
         return [f"this campaign ended as {state}: fix the cause (mpd logs {ref} <stage> --err), then repeat your mpd submit command"]
     if failed:
         return [f"mpd logs {ref} {failed.split('.')[0]} --err    the whole error log", "docs/TROUBLESHOOTING.md explains the usual failures",
-                "repeat your mpd submit command with --force to run the unfinished work again (finished stages skip themselves)"]
+                "repeat your mpd submit command with --force to continue: stages that are queued, running or finished are kept, the "
+                "others are queued again, with any --train-time, --sbatch-arg or similar option you changed"]
     if have_results:
         return [f"mpd results {ref}"]
     live = [s for s, j in jobs.items() if _field(states, j, "state").split()[0] in ("PENDING", "RUNNING", "CONFIGURING", "COMPLETING", "-")]
     if live:
         return [f"mpd status {ref}    again later", f"mpd logs {ref} {live[0].split('.')[0]}    output of a stage while it runs"]
     return [f"mpd results {ref}"]
+
+
+def _status_rows(st, states: dict, reasons: dict, progress: dict) -> list[list[str]]:
+    """One row per stage: stage, state, elapsed, reason, then job, exit, finished tasks and a note. The first four are one word each."""
+    rows = []
+    for stage, job in st.jobs.items():
+        js = states.get(job)
+        base = stage.split(".")[0]
+        done = progress.get(base) if stage == base else None
+        state = js.state.split()[0] if js and js.state else ""
+        reason = "" if state in ("RUNNING", "COMPLETING", "CONFIGURING") else reasons.get(job)    # an array's waiting tasks have reasons of their own
+        rows.append([stage, _word(state), _word(js.elapsed if js else ""), _word(reason), job, _word(js.exitcode if js else ""),
+                     f"{done[0]}/{done[1]}" if done else "-", js.detail if js and js.detail else ""])
+    return rows
+
+
+def _problems(path: Path, st, rows: list[list[str]], states: dict, reasons: dict, plans: dict, ref: str, api) -> tuple[list[str], str | None]:
+    """Plain words and exact commands for every stage that failed or was cancelled; the stage a student should look at first."""
+    lines: list[str] = []
+    first = None
+    if st.state == "cancelled":                              # `mpd cancel` stopped it: one sentence for all the stages it cancelled
+        stopped = [r[0] for r in rows if r[1] == "CANCELLED"]
+        lines += _advice_block(api.advise_cancelled(stopped) if stopped else [])
+    for stage, state, _elapsed, _reason, job, *_ in rows:
+        if state not in BAD_STATES or (state == "CANCELLED" and st.state == "cancelled"):
+            continue
+        js, reason = states.get(job), reasons.get(job, "")
+        err, out = api.log_tail(path, stage, 200, err=True, job=job), api.log_tail(path, stage, 200, err=False, job=job)
+        said = api.advise(stage, job, js, ref=ref, reason=reason, err=err, out=out, plan=plans.get(stage), cluster=st.cluster,
+                          cancelled=st.state == "cancelled")
+        if state == "CANCELLED" and first:
+            said = said[:1]                                  # a stage cancelled after another one failed: that one is the story
+        lines += _advice_block(said)
+        if first is None and state in FAILURE_STATES:
+            first = stage
+            tail = api.failure_tail(path, stage, 20, job=job)
+            lines += [f"  last lines of the error log of {stage} (job {job}):", textwrap.indent(tail or "(empty)", "    ")]
+    return lines, first
+
+
+def _waiting(rows: list[list[str]], reasons: dict, plans: dict, ref: str, api) -> list[str]:
+    """One line for every stage that has not started and Slurm's reason, in words."""
+    lines = []
+    ended_badly = {r[0] for r in rows if r[1] in BAD_STATES}
+    for stage, state, _elapsed, reason, job, *_ in rows:
+        if state != "PENDING" or reason == "-":
+            continue
+        text = api.pending_help(reasons.get(job) or reason, ref)
+        deps = (plans.get(stage) or {}).get("depends_on") or []
+        if reason == "Dependency" and deps:
+            stuck = [d for d in deps if d in ended_badly]
+            text = (f"it waits for {', '.join(stuck)}, which did not end well (see problems above); it cannot start before that is fixed."
+                    if stuck else f"it waits for {', '.join(deps)} to finish. Nothing to do.")
+        lines.append(_wrapped(f"{stage:<11} {reason}: {text}"))
+    return lines
 
 
 def _show_campaign(path: Path, home: Path | None, api) -> int:
@@ -435,35 +521,34 @@ def _show_campaign(path: Path, home: Path | None, api) -> int:
         return 1
     ids = list(dict.fromkeys(st.jobs.values()))
     states = api.job_states(ids) if ids else {}
-    waiting = [j for j in ids if _field(states, j, "state").startswith("PENDING")]
-    reasons = api.pending_reasons(waiting) if waiting else {}
-    progress = api.stage_progress(path)
+    reasons = api.pending_reasons(ids, any_state=True) if ids else {}
+    progress, plans, ref = api.stage_progress(path), api.stage_plan(path), _ref(path, home)
     print(f"campaign   {st.campaign_id}\ndirectory  {path}\nstate      {st.state}"
           + (f"   (submitted {st.submitted_at})" if st.submitted_at else ""))
     if st.message:
         print(f"           {st.message}")
+    replaced = (api.read_marker(path) or {}).get("replaced") or {}
+    if replaced:
+        print("earlier    " + "; ".join(f"{s} {', '.join(map(str, j))}" for s, j in replaced.items())
+              + "   (jobs that --force replaced; their logs stay in logs/)")
     if ids and not states:
         print("slurm      no job states: sacct and squeue are not installed here, the controller did not answer, or the jobs are too new")
-    print(f"\n{'stage':<12} {'job':<10} {'state':<14} {'elapsed':<10} {'exit':<6} progress / note")
-    failed = None
-    for stage, job in st.jobs.items():
-        state = _field(states, job, "state")
-        base = stage.split(".")[0]
-        done = progress.get(base) if stage == base else None
-        notes = [f"{done[0]}/{done[1]} done"] if done else []
-        if _field(states, job, "detail") != "-":
-            notes.append(_field(states, job, "detail"))
-        if job in reasons:
-            notes.append(f"waiting: {reasons[job]}")
-        print(f"{stage:<12} {job:<10} {state:<14} {_field(states, job, 'elapsed'):<10} {_field(states, job, 'exitcode'):<6} "
-              f"{'  '.join(notes)}".rstrip())
-        if failed is None and state.split()[0] in FAILURE_STATES:
-            failed = stage
-    if failed:
-        print(f"\nlast lines of the error log of {failed}:")
-        print(textwrap.indent(api.failure_tail(path, failed.split(".")[0], 20) or "(empty)", "  "))
+    rows = _status_rows(st, states, reasons, progress)
+    header = ["stage", "state", "elapsed", "reason", "job", "exit", "tasks", "note"]
+    widths = [max([len(h), *(len(r[i]) for r in rows)]) for i, h in enumerate(header)]
+    print()
+    for row in [header, *rows]:
+        print("  ".join(cell.ljust(w) for cell, w in zip(row, widths)).rstrip())
+    problems, failed = _problems(path, st, rows, states, reasons, plans, ref, api)
+    if problems:
+        print("\nproblems:")
+        print("\n".join(problems))
+    waiting = _waiting(rows, reasons, plans, ref, api)
+    if waiting:
+        print("\nwaiting:")
+        print("\n".join(waiting))
     print("\nnext:")
-    for line in _next_steps(_ref(path, home), st.state, failed, states, st.jobs, (path / "evaluate" / "summary.json").is_file()):
+    for line in _next_steps(ref, st.state, failed, states, st.jobs, (path / "evaluate" / "summary.json").is_file()):
         print("  " + line)
     return 0
 

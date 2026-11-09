@@ -117,16 +117,20 @@ def missing_foldseek(home: Path | str | None, cluster: str | None = None, *, exp
     if given is not None:
         return f"MPD_FOLDSEEK={given} is not an executable file (and no fallback is used while it is set)"
     where = foldseek.pinned_path(home) if home else "<home>/tools/" + foldseek.FOLDSEEK.dirname
-    return f"Foldseek was not found ({where}). Run on a login node: {foldseek.fix_command(cluster, home, explicit_home=explicit_home)}"
+    return (f"Foldseek was not found ({where}). Run on a login node: "
+            f"{foldseek.fix_command(cluster, home, explicit_home=explicit_home)} (or set MPD_FOLDSEEK to a Foldseek you already have)")
 
 
-def open_engine(home: Path | str | None = None, name: str | None = None, *, cluster: str | None = None):
-    """The 3Di source: Foldseek (default) or, with MPD_3DI_ENGINE=biotite, its NumPy port."""
+def open_engine(home: Path | str | None = None, name: str | None = None, *, cluster: str | None = None,
+                explicit_home: bool = False):
+    """The 3Di source: Foldseek (default) or, with MPD_3DI_ENGINE=biotite, its NumPy port.
+
+    `cluster` and `explicit_home` only shape the fix command in the error (`--cluster NAME`, plus `--home` when asked)."""
     name = (name or os.environ.get(ENGINE_ENV) or "foldseek").strip().lower()
     if name == "foldseek":
         binary = foldseek.locate(home)
         if binary is None:
-            raise FoldseekError(missing_foldseek(home, cluster))
+            raise FoldseekError(missing_foldseek(home, cluster, explicit_home=explicit_home))
         return FoldseekEngine(binary)
     if name == "biotite":
         from .biotite_engine import BiotiteEngine

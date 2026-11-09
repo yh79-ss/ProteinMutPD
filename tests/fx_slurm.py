@@ -19,7 +19,7 @@ Test-side API (the object the fixture returns)
     squeue_fails(calls=True)  scancel_fails()  sacct_fails()                            controller errors for one tool
     calls(tool=None) -> [Call(tool, argv, rc, stdout, stderr, t, info)]                 test_only_calls()   submitted()
     jobs() -> {id: job}   job(id_or_stage) -> job | None   alive_ids()   state_of(id)    submitted() -> accepted real jobs in order
-    set_state(job, state, reason=None, exitcode=None, elapsed=None, tasks=None)         add_job(**fields) -> id (a foreign or stale job)
+    set_state(job, state, reason=None, exitcode=None, elapsed=None, tasks=None, node=None)   add_job(**fields) -> id (a foreign or stale job)
     sleep(s), clock(), sleeps, advance(s)     injectable `sleep=` / `clock=`             remove(tool) / restore(tool)
     env(extra=None) -> environ for a subprocess (fake PATH, BASH_ENV, USER)             set_modules(names)  what `module load` accepts
     assert_no_tripwire() / clear_tripwires()   srun/salloc/sacctmgr were called         path   the PATH the fixture installed
@@ -425,7 +425,7 @@ def _advance(sc: dict, st: dict) -> None:
             if any(s in TERMINAL and s != "COMPLETED" for s in dep_states):
                 j["reason"] = "DependencyNeverSatisfied"
                 if j["kill_invalid"]:
-                    j["state"] = "CANCELLED"
+                    j["state"], j["reason_final"] = "CANCELLED", True
             elif all(s == "COMPLETED" for s in dep_states):
                 j["state"], j["reason"] = "RUNNING", "None"
         elif j["state"] == "RUNNING":
@@ -473,7 +473,8 @@ def _squeue_fmt(fmt: str, job: dict, row_state: str, st: dict) -> str:
         c = m.group("c")
         value = {"A": str(job["id"]), "F": str(job["id"]), "i": str(job["id"]) if job["n_array"] <= 1 else f"{job['id']}_[0-{job['n_array'] - 1}]",
                  "j": job["name"], "k": job["comment"] or "(null)", "T": row_state, "t": _STATE_CODES.get(row_state, row_state[:2]),
-                 "r": job["reason"] if pending else "None", "R": f"({job['reason']})" if pending else "fakenode001",
+                 "r": job["reason"] if pending or (job.get("reason_final") and row_state in TERMINAL) else "None",
+                 "R": f"({job['reason']})" if pending else "fakenode001",
                  "M": job["elapsed"] or _ELAPSED.get(row_state, "00:30:00"), "u": job["user"], "P": job["partition"],
                  "a": job["account"], "D": "1", "C": str(job["cpus"]), "N": "" if pending else "fakenode001",
                  "V": "2026-11-09T11:00:00", "S": "N/A" if pending else "2026-11-09T11:05:00"}.get(c, "")
@@ -585,7 +586,8 @@ def _sacct(ctx: dict):
             values = {"jobid": jid, "jobidraw": jid, "jobname": job["name"], "state": state, "elapsed": _elapsed_of(job, state),
                       "exitcode": job["exitcode"] if state in TERMINAL else "0:0", "account": job["account"] or "123456789012",
                       "partition": job["partition"], "alloccpus": str(job["cpus"]), "reqmem": job["mem"], "user": job["user"],
-                      "submit": "2026-11-09T11:00:00", "comment": job["comment"]}
+                      "submit": "2026-11-09T11:00:00", "comment": job["comment"], "timelimit": job["time"] or "Partition_Limit",
+                      "nodelist": "None assigned" if state == "PENDING" or job.get("node") == "" else job.get("node") or "fakenode001"}
             rows.append("|".join(values.get(f.lower(), "") for f in fields))
     head = [] if noheader else ["|".join(fields)]
     return 0, "".join(line + "\n" for line in head + rows), ""
@@ -945,13 +947,16 @@ class FakeSlurm:
         return self.job(which)["state"]
 
     def set_state(self, which, state: str, *, reason: str | None = None, exitcode: str | None = None,
-                  elapsed: str | None = None, tasks: list | None = None) -> None:
+                  elapsed: str | None = None, tasks: list | None = None, node: str | None = None) -> None:
         st = self._state()
         key = str(self.job(which)["id"])
         j = st["jobs"][key]
         j["state"] = state
+        if node is not None:
+            j["node"] = node
         if reason is not None:
             j["reason"] = reason
+            j["reason_final"] = state in TERMINAL         # squeue shows "TimeLimit" and the like for a job that ended, not "None"
         if exitcode is not None:
             j["exitcode"] = exitcode
         if elapsed is not None:

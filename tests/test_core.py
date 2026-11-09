@@ -175,7 +175,7 @@ def test_direct_loss_is_zero_for_identical_logits_and_positive_otherwise():
     assert float(only_kl) == pytest.approx(4.5, abs=1e-4)          # a constant shift changes no softmax: KL stays 0
     wt, row, mt = torch.zeros(4, dtype=torch.long), torch.tensor([0, 0, 2]), torch.tensor([1, 2, 3])
     loss, _, gs, gt = score_loss(t.clone().requires_grad_(), t, wt, row, mt)
-    assert float(loss) == pytest.approx(0, abs=1e-6) and gs.shape == gt.shape == (3,)
+    assert float(loss.detach()) == pytest.approx(0, abs=1e-6) and gs.shape == gt.shape == (3,)
 
 
 def test_flatten_variants_lists_the_observed_mutants_of_a_batch(bm):

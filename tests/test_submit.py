@@ -481,6 +481,11 @@ def test_a_second_submission_is_refused_in_these_states_and_nothing_is_written(f
     with pytest.raises(SubmitError) as exc:
         submit(other, scripts, echo=lambda *_: None, sleep=fake_slurm.sleep)
     assert plan.campaign_id in str(exc.value) and "prepare=77" in str(exc.value) and "mpd status" in str(exc.value) and "--force" in str(exc.value)
+    flat = " ".join(str(exc.value).split())
+    assert ("A changed --train-time, --score-time, --teacher-time, --array-throttle, --sbatch-arg, --module or --env (except MPD_DTYPE, "
+            "MPD_TF32 and MPD_STRUCTURE_LEGACY_MASK) keeps the campaign") in flat
+    assert "--force applies it to the stages it queues again" in flat and "a stage that is still queued or running keeps the options it was submitted with" in flat
+    assert "A changed --gpu, --train-gpus, --eval-data or --score-shards is a different campaign" in flat
     assert fake_slurm.calls() == [] and marker(plan) == before
     with pytest.raises(SubmitError, match="Nothing was written"):
         write_campaign(other, render=stub_render)
@@ -513,6 +518,51 @@ def test_a_failed_or_cancelled_campaign_is_submitted_again_with_a_message(fake_s
     jobs, said = go(fake_slurm, fresh, scripts)
     assert any(f"the earlier submission of this campaign {state} (an old problem); submitting it again" in s for s in said)
     assert marker(fresh)["state"] == "submitted" and marker(fresh)["nonce"] == "freshnonce000" and jobs["prepare"] != "5"
+
+
+def test_a_cancelled_campaign_is_submitted_again_without_force_and_keeps_its_finished_stages(fake_slurm, tmp_path):
+    plan, scripts = prepared(tmp_path, units=("all",), shards=1)
+    first, _ = go(fake_slurm, plan, scripts)
+    root = plan.campaign_dir
+    for name, marker_file in (("prepare", "contexts/MANIFEST.json"), ("teacher", "teacher/COMPLETE.json")):
+        (root / marker_file).parent.mkdir(parents=True, exist_ok=True)
+        (root / marker_file).write_text("{}")
+        fake_slurm.set_state(first[name], "COMPLETED")
+    for name in ("train", "score-base", "score", "evaluate"):
+        fake_slurm.set_state(first[name], "CANCELLED")
+    write_marker(root, {**marker(plan), "state": "cancelled", "message": "cancelled 4 job(s) with mpd cancel"})
+    before = len(fake_slurm.calls("sbatch"))
+    again = stub_plan(tmp_path, units=("all",), shards=1, nonce="secondnonce00")
+    jobs, said = go(fake_slurm, again, write_campaign(again, render=stub_render))             # no force: nothing is alive
+    assert [c.info["stage"] for c in fake_slurm.calls("sbatch")[before:]] == ["train", "score-base", "score", "evaluate"]
+    assert jobs["prepare"] == first["prepare"] and jobs["teacher"] == first["teacher"]         # their ids stay on record
+    assert deps_of(calls_for(fake_slurm, "train")[-1]) == ""                                    # the teacher is finished: nothing to wait for
+    assert any(s.startswith("finished  prepare") for s in said) and any(s.startswith("finished  teacher") for s in said)
+    assert marker(again)["state"] == "submitted" and marker(again)["replaced"]["train"] == [first["train"]]
+
+
+def test_a_failed_campaign_does_not_duplicate_a_job_that_is_still_alive(fake_slurm, tmp_path):
+    plan, scripts = prepared(tmp_path, minimal=True)
+    first, _ = go(fake_slurm, plan, scripts)
+    write_marker(plan.campaign_dir, {**marker(plan), "state": "failed", "message": "an old problem"})     # --force kept these jobs earlier
+    before = len(fake_slurm.calls("sbatch"))
+    again = stub_plan(tmp_path, minimal=True, nonce="secondnonce00")
+    jobs, said = go(fake_slurm, again, write_campaign(again, render=stub_render))
+    assert len(fake_slurm.calls("sbatch")) == before and jobs == first
+    assert any(s.startswith("nothing to submit") for s in said) and marker(again)["state"] == "submitted"
+
+
+@pytest.mark.parametrize("state", ["failed", "cancelled"])
+def test_a_failed_or_cancelled_campaign_with_a_different_recipe_is_not_rewritten(fake_slurm, tmp_path, state):
+    plan, _ = prepared(tmp_path, minimal=True)
+    write_marker(plan.campaign_dir, {"campaign_id": plan.campaign_id, "state": state, "jobs": {}})
+    (plan.campaign_dir / "resolved.json").write_text('{"edited": true}')                          # another mpd version, or a hand edit
+    with pytest.raises(SubmitError, match=f"ended as {state} and has a different recipe") as exc:
+        write_campaign(stub_plan(tmp_path, minimal=True, nonce="freshnonce000"), render=stub_render)
+    text = str(exc.value)
+    assert "resolved.json" in text and "--seed" in text and "cannot be submitted again" in text
+    assert json.loads((plan.campaign_dir / "resolved.json").read_text()) == {"edited": True}      # left as it was
+    assert fake_slurm.calls() == []
 
 
 def test_two_submissions_racing_for_the_marker_cannot_both_win(fake_slurm, tmp_path, monkeypatch):
@@ -632,6 +682,21 @@ def test_the_ids_of_every_replaced_job_stay_on_record_across_several_repairs(fak
     assert len(set(seen)) == 3 and marker(plan)["jobs"]["train"] == seen[-1]
 
 
+def test_force_says_that_a_kept_stage_keeps_the_options_it_was_submitted_with(fake_slurm, tmp_path):
+    plan, scripts = prepared(tmp_path, units=("all",), shards=1)
+    first, _ = go(fake_slurm, plan, scripts)
+    fake_slurm.set_state(first["train"], "TIMEOUT")
+    fake_slurm.set_state(first["prepare"], "RUNNING")                                  # still running: kept, with its old script
+    again = stub_plan(tmp_path, units=("all",), shards=1, nonce="secondnonce00")
+    jobs, said = go(fake_slurm, again, write_campaign(again, force=True, render=stub_render), force=True)
+    note = next(s for s in said if s.startswith("note: "))
+    assert "kept stages (prepare, teacher, score-base) stay queued or running with the options they were submitted with" in note
+    assert "`mpd cancel` the campaign" in note
+    assert jobs["prepare"] == first["prepare"] and jobs["train"] != first["train"]
+    fresh, nothing = go(fake_slurm, again, write_campaign(again, force=True, render=stub_render), force=True)
+    assert not any(s.startswith("note: ") for s in nothing) and any("nothing to submit" in s for s in nothing)       # nothing queued: nothing to explain
+
+
 def test_force_on_a_chain_that_is_all_queued_changes_nothing(fake_slurm, tmp_path):
     plan, scripts = prepared(tmp_path, minimal=True)
     first, _ = go(fake_slurm, plan, scripts)
@@ -730,9 +795,40 @@ def test_write_campaign_with_force_rewrites_only_scripts_and_only_for_the_same_r
     assert all(k.startswith("scripts/") or k == "plan.json" for k in changed) and "plan.json" in changed
     assert all(k in after for k in before) and "anothernonce0" in (plan.campaign_dir / "scripts" / "train.sbatch").read_text()
     different = stub_plan(tmp_path, units=("x", "y"))
-    with pytest.raises(SubmitError, match="different recipe .*tasks/train.json"):
+    with pytest.raises(SubmitError, match="different recipe .*tasks/train.json") as exc:
         write_campaign(different, force=True, render=stub_render)
     assert snapshot(plan.campaign_dir) == after
+    text = str(exc.value)
+    assert "so --force cannot continue it" in text and "  tasks/train.json: 1 tasks on disk, 2 now" in text
+    assert "usual cause is another mpd version or an edited file" in " ".join(text.split()) and "change --seed to start a new campaign" in " ".join(text.split())
+
+
+def test_the_refusal_for_a_changed_resolved_json_names_the_keys_that_differ(tmp_path):
+    plan = stub_plan(tmp_path)
+    write_campaign(plan, render=stub_render)
+    write_marker(plan.campaign_dir, {"campaign_id": plan.campaign_id, "state": "partial", "jobs": {}})
+    other = stub_plan(tmp_path, shards=7)
+    other.resolved["microbatch"] = 1
+    with pytest.raises(SubmitError) as exc:
+        write_campaign(other, force=True, render=stub_render)
+    text = str(exc.value)
+    assert "(resolved.json, tasks/score-base.json, tasks/score.json)" in text
+    assert "  resolved.json: microbatch: \"<absent>\" on disk, 1 now; score_shards: {\"proteingym\": 2} on disk, {\"proteingym\": 7} now" in text
+    assert "  tasks/score.json: 2 tasks on disk, 7 now" in text and "  tasks/score-base.json: 2 tasks on disk, 7 now" in text
+
+
+def test_plan_json_records_the_partition_limit_of_each_stage_when_the_plan_knows_it(tmp_path):
+    from mpd.slurm.cluster import Cluster
+    plan = stub_plan(tmp_path)
+    plan.options.cluster = Cluster.load("grace")                      # a stand-in plan whose profile is the real one
+    for st in plan.stages:
+        st.gpu = "a100" if st.gpus else None
+    write_campaign(plan, render=stub_render)
+    stages = {s["name"]: s["partition_limit_s"] for s in json.loads((plan.campaign_dir / "plan.json").read_text())["stages"]}
+    assert stages["train"] == 4 * 86400 and stages["prepare"] == 7 * 86400 and stages["evaluate"] == 7 * 86400
+    bare = stub_plan(tmp_path, campaign_id="other__ab12cd34")
+    write_campaign(bare, render=stub_render)
+    assert {s["partition_limit_s"] for s in json.loads((bare.campaign_dir / "plan.json").read_text())["stages"]} == {None}      # a stub profile has none
 
 
 @pytest.mark.parametrize("state", ["failed", "cancelled"])

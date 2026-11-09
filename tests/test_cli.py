@@ -462,7 +462,8 @@ def test_fetch_model_without_a_cluster_has_no_deadline(capsys, cli_env, fetched)
 def test_fetch_model_all_fetches_what_the_pipeline_can_use(capsys, cli_env, fetched):
     assert run_cli(capsys, "fetch", "model", "--all", "--home", cli_env.home)[0] == 0
     assert [c["key"] for c in fetched] == models.fetchable_keys()
-    assert "saprot-650m" not in [c["key"] for c in fetched]
+    keys = [c["key"] for c in fetched]
+    assert {"saprot-35m", "saprot-650m"} <= set(keys) and "aido-rag-16b" not in keys     # SaProt is available; AIDO is never fetched
 
 
 def test_fetch_model_stopped_by_the_time_budget_exits_3(capsys, cli_env, monkeypatch):

@@ -7,7 +7,6 @@ AA20 log-marginal the official SaProt mutation score is built from.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import numpy as np
@@ -15,6 +14,7 @@ import torch
 
 from .. import registry
 from ..contexts import ContextTable
+from ..data import models
 from ..structure import vocab
 from .esm2 import LORA_TARGETS, default_dtype, model_path, optimal_window
 
@@ -48,7 +48,7 @@ class Saprot:
             model = get_peft_model(model, LoraConfig(r=lora["rank"], lora_alpha=lora["alpha"], lora_dropout=0.0,
                                                      bias="none", target_modules=LORA_TARGETS,
                                                      task_type="FEATURE_EXTRACTION"))
-            if not os.environ.get("MPD_MODEL_" + key.upper().replace("-", "_")):    # an override folder is not the pinned weights
+            if models.override_path(key) is None:        # an override folder is the user's own weights, not the pin
                 model.peft_config["default"].revision = info.revision
         elif adapter is not None:
             from peft import PeftModel
@@ -63,7 +63,9 @@ class Saprot:
         return [p for p in self.module.parameters() if p.requires_grad]
 
     def save_adapter(self, path: Path) -> None:
-        self.module.save_pretrained(path, safe_serialization=True)
+        # As in Esm2: LoRA on the attention projections never changes the vocabulary, and saying so keeps PEFT from asking
+        # huggingface.co for the base model's config.json (the base is named by its Hub id).
+        self.module.save_pretrained(path, safe_serialization=True, save_embedding_layers=False)
 
     def encode(self, table: ContextTable, structures=None) -> None:
         """Tokenize the table's sequences with their structure strings (`structures.for_table`)."""

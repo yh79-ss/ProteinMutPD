@@ -4,10 +4,12 @@
 structural letter from [Foldseek](https://github.com/steineggerlab/foldseek)'s 3Di alphabet. `mpd` can use SaProt-35M and
 SaProt-650M as a student or a teacher.
 
-> **Status.** The SaProt library (structure strings, the Foldseek wrapper, the model class, the benchmark changes) is
-> written and tested on CPU. It is not yet connected to the five stages and `mpd models` still lists both models as
-> `planned`, so the commands under [Using SaProt](#using-saprot) are enabled when that status flips. Nothing here has
-> run on Grace or on a GPU through Slurm.
+> **Status.** SaProt-35M and SaProt-650M are `available` in `mpd models`. The library (structure strings, the Foldseek
+> wrapper, the model class, the benchmark changes) and the stages that use it (`prepare` builds the strings, `teacher`,
+> `train` and `score` read them) are written and tested on CPU, with tiny random models and a fake Foldseek; the library
+> was also compared with the earlier study's stored outputs. Nothing here has run on Grace, on a GPU, or through Slurm.
+> The pinned Foldseek release has never been executed, and SaProt on VenusMutHub needs a structure set that is not
+> published yet.
 
 Every statement below is one of: *tested here* (on CPU, with this code), *from a document* (cited), *from the earlier analysis* (see
 next paragraph), or *not verified* (said so). The *earlier study* is the maintainers' previous SaProt and ESM2 distillation work, whose
@@ -44,7 +46,7 @@ need nothing and keep their file formats and digests.
 
 | benchmark | structure files | B-factor column | masking |
 |---|---|---|---|
-| ProteinGym v1.3 | the official AF2 models (`mpd fetch proteingym`): 187 distinct sequences in 217 assays use 186 files | pLDDT, 0-100 | pLDDT < 70 |
+| ProteinGym v1.3 | the official AF2 models: 187 distinct sequences in 217 assays use 186 of the 197 files. They are part of the `mpd fetch proteingym` download (`ProteinGym_AF2_structures.zip`, 19.2 MB, unpacked to `<home>/data/proteingym-v1.3/ProteinGym_AF2_structures/`; a fetch made for this work holds those 197 files) | pLDDT, 0-100 | pLDDT < 70 |
 | VenusMutHub | one structure per protein from the Venus structure set: 159 experimental, 232 AlphaFold DB, 98 ESMFold | experimental: crystallographic B-factor; AlphaFold DB: pLDDT 0-100; ESMFold: pLDDT 0-1 | experimental never masked; AlphaFold DB pLDDT < 70; ESMFold pLDDT x 100 < 70 |
 
 ### Masking policy
@@ -105,7 +107,24 @@ their 2,954 residues differ; measured here). A set keeps one string per sequence
 different string from another dataset is stored separately and used when that dataset is scored
 (`StructureSet.scoped(dataset)`), so every dataset is scored with its own structures, exactly as in a single-dataset campaign. A
 lookup that does not name the dataset raises an error when the table holds one of these sequences, instead of choosing one.
-*Tested here* with fake structures and, for the strings above, on the real files.
+*Tested here* with fake structures and, for the strings above, on the real files; through the stages in
+`tests/test_saprot_pipeline.py`, which trains on each benchmark in turn and checks the teacher table and the scores against the
+model run directly on that dataset's own strings.
+
+### Which stage reads what
+
+| stage | reads | what it keeps |
+|---|---|---|
+| `prepare` | the structure files, through Foldseek | `contexts/structures.json`, written before `contexts/MANIFEST.json` (the file that marks the stage as finished); `MANIFEST.json` gets a `structures` block (digest, number of sequences, fraction masked, engine, masking policy, datasets, conflicts, `dms_labels_opened: false`). It also checks that the weights of the models the run loads are fetched, so a missing or purged weights folder fails in this CPU job minutes after submission instead of in the GPU queue |
+| `teacher` | the strings of the training data, if the teacher is SaProt | `structures_digest` in `teacher/COMPLETE.json`; a table made with other strings is recomputed, and `train` refuses it |
+| `train` | the strings of the training data, if the student is SaProt | `structures_digest` in `CONFIG.json`, which is part of the configuration digest: a resumable checkpoint made with other strings is not resumed, the unit starts again and the old attempt is kept aside |
+| `score` | the strings of the dataset being scored, if the student is SaProt | `structures_digest` in every shard's JSON |
+| `evaluate` | no structure | |
+
+The digest is that of the whole `structures.json`, so a change in a dataset a stage does not read also makes a cached teacher table or
+a checkpoint count as stale. That costs a recomputation, never a wrong result. `prepare` is the only stage that writes the file, and
+running it again on unchanged inputs writes identical strings. No stage but `evaluate` opens a label; a test puts a tripwire on both
+benchmarks' label readers and runs every other stage with a SaProt recipe on both datasets.
 
 ## Foldseek
 
@@ -117,16 +136,16 @@ binary in `<home>/cache/3di/<engine id>/`, so a second campaign on the same data
 | | |
 |---|---|
 | pinned release | `10-941cd33` (2025-01-19), the immutable GitHub release asset `foldseek-linux-avx2.tar.gz`, pinned by the sha256 of the archive and of the binary inside it (`src/mpd/data/sources.py`) |
-| install | `mpd fetch foldseek --cluster grace` on a login node, into `<home>/tools/foldseek-10-941cd33/`, then `foldseek version` is run and recorded in `FETCHED.json` (the `mpd fetch` command is wired by the CLI; the library call is `mpd.structure.tools.fetch_foldseek`) |
-| another binary | `MPD_FOLDSEEK=/path/to/foldseek` (also what `--foldseek` sets). It is never second-guessed: if it is set and not an executable file there is no fallback. The binary's sha256 is recorded in `structures.json`; one that is not the pin only produces a warning |
+| install | `mpd fetch foldseek --cluster grace` on a login node, into `<home>/tools/foldseek-10-941cd33/`, then `foldseek version` is run and recorded in `FETCHED.json`. On a machine that cannot download, put the archive in reach and pass it: `mpd fetch foldseek --cluster grace --from-file <foldseek-linux-avx2.tar.gz>` (checked against the pinned sha256 first) |
+| another binary | `MPD_FOLDSEEK=/path/to/foldseek` (there is no command-line flag; the variable is forwarded to jobs). It is never second-guessed: if it is set and not an executable file there is no fallback. The binary's sha256 is recorded in `structures.json`; one that is not the pin only produces a warning |
 | no binary | `MPD_3DI_ENGINE=biotite` uses biotite's NumPy port (`pip install biotite`, 1.6.0 tested). Measured here against the 2026 Foldseek build on all 675 ProteinGym and Venus structure files: identical on 674; in the other (the 2,832-residue BRCA2 model) one residue differs. The engine is recorded in `structures.json`. Foldseek stays the default because it defines 3Di and the recorded results |
 | licence | Foldseek is GPL-3.0. `mpd` downloads it from its owners and runs it as a separate program; it is never bundled, committed, put in a container image or a deposit. This is not legal advice |
 
 `fetch_foldseek` verifies the archive's size and sha256 before opening it, extracts to a staging folder, checks the binary's sha256
 against the pin before making it executable, and only then runs it. *Tested here* against a fake release served by a local HTTP
 server: a wrong archive, a wrong binary (never executed), an unsafe archive member, a download with rate limiting (`Retry-After`
-honoured), a binary that does not run, and `--from-dir`/`from_file`. *Not verified:* a real download of the pinned release and running
-it. The build was not allowed to download and execute an external binary.
+honoured), a binary that does not run, and a local archive (`--from-file`). *Not verified:* a real download of the pinned release and
+running it. The build was not allowed to download and execute an external binary.
 
 ### Is the pinned release the build the earlier results came from? Not verified
 
@@ -260,11 +279,11 @@ PYTHONPATH=src python scripts/maintainers/regress_saprot_proteingym.py --home <h
 
 ## Using SaProt
 
-*Enabled when SaProt's status in `mpd models` changes from `planned` to `available`.* On a login node:
+On a login node (`--cluster grace`; the other profile works the same way):
 
 ```bash
 bash scripts/setup_env.sh --cluster grace
-mpd fetch proteingym --cluster grace
+mpd fetch proteingym --cluster grace                 # the data and the AF2 structures SaProt reads (62.4 MB, 19.2 MB of them structures)
 mpd fetch foldseek --cluster grace
 mpd fetch model saprot-650m esm2-3b --cluster grace
 mpd doctor --cluster grace
@@ -282,9 +301,22 @@ mpd plan --cluster grace --account <account> --teacher saprot-650m --student esm
 published yet, `mpd fetch venus-structures --cluster grace --from-dir <folder with the deposit files>`. `mpd doctor` and `mpd plan`
 report a missing Foldseek or missing structure data with the command that fixes it.
 
-A cross-family pair with a `direct-*` method trains the student on the teacher's absolute scale; SaProt's log-marginals and ESM2's raw
-logits sit on different offsets, so for those pairs the `score-*` methods, which only use differences, are the safer choice (inferred,
-not tested). The memory estimates for SaProt (`act_gb`) are placeholders equal to the same-size ESM2 model and have not been measured.
+### A teacher and a student from different families
+
+SaProt's 20 values at a position are, for each amino acid, a log-sum over the 21 structure states of its tokens; ESM2's are raw
+head outputs. The two sit on different offsets, and the offset can change from position to position. The `score-*` methods train on differences of log-softmax scores, in which any constant per position cancels, so they do
+not depend on the offset. The `direct-*` methods apply a Huber loss to the raw values (plus a KL term, which is offset-free), so a
+student trained on a teacher of the other family inherits the teacher's offset. The earlier study trained SaProt with the same
+direct objective on raw AIDO log-marginals (from the earlier analysis, not re-checked here). `tests/test_saprot_offsets.py` pins the property on random
+numbers: shifting the teacher's values by a constant per position leaves the score loss unchanged and changes the direct loss.
+
+**This was reasoned and unit-tested, not studied.** Nobody has measured what the offset does to a real SaProt and ESM2 pair, or which
+method is better for one. Pairs inside one family (ESM2 to ESM2, SaProt to SaProt) have no such offset.
+
+The memory estimates for SaProt (`act_gb`) are placeholders equal to the same-size ESM2 model and have not been measured; the
+walltimes `mpd plan` prints for SaProt stages are the ESM2 ones extrapolated by size and are marked `est`. The `prepare` stage asks
+for a fixed 4 hours on 8 CPUs (a CPU job, no GPU service units); Foldseek itself needed about 15 seconds for the 675 benchmark
+structures on one core in the earlier analysis (not measured on Grace).
 
 | variable | meaning |
 |---|---|
@@ -304,5 +336,9 @@ not tested). The memory estimates for SaProt (`act_gb`) are placeholders equal t
 | `fetch_foldseek` with hash checks, exec bit, rate limiting | tested here against a fake release; a real download and run: not verified |
 | the pinned release 10 gives the same 3Di as the 2026 build | not verified |
 | Foldseek on Grace | not verified |
-| the stage hooks (`prepare`, `teacher`, `train`, `score`) and the status flip | not done yet |
+| the stage hooks: strings built by `prepare`, read by `teacher`, `train` and `score` with each dataset's own structure, part of the teacher-table and checkpoint digests, no label opened before `evaluate`; the weights check at the start of `prepare` | tested on CPU here with tiny random SaProt and ESM2 models and a fake Foldseek (`tests/test_saprot_pipeline.py`) |
+| the messages for a missing Foldseek, ProteinGym structures or Venus structure set, through `mpd plan` and `mpd submit` | tested on CPU here through the real command line (`tests/test_saprot_cli.py`) |
+| the opt-in real-data tests (`tests/test_saprot_slow.py`, six tests) | passed on 2026-11-09 with the 2026-09-09 Foldseek build, the earlier study's data and the SaProt-35M weights: 6 passed in 58 s |
+| the `prepare` stage itself on the real files (run by hand once, CPU, not through Slurm, with the 2026-09-09 Foldseek build) | ProteinGym alone (direct-all, 62,671 training and 37,753 evaluation contexts, 186 structure files): 20 s, and its `structures.json` digest is the recorded ProteinGym digest `baea4585...`. ProteinGym and VenusMutHub together (score-all, 675 structure files run through Foldseek for the first time): 23 s, 666 sequences, 10 with a different structure in the second dataset, 17.6% of residues masked. Times are from a loaded login node |
+| the planner's walltime and memory for SaProt jobs | estimates extrapolated from ESM2, not measured |
 | a GPU run, bf16 on a GPU, two-GPU training with SaProt | not verified |

@@ -44,23 +44,27 @@ def run(c: Campaign, task: dict) -> None:
         print(f"{target.name}: already done", flush=True)
         return
     table = ContextTable.load(c.stem_eval_for(unit, dataset))
+    structures = c.structures_for("student", dataset)         # this dataset's own strings; None for a sequence-only student
     rows = np.arange(len(table))[shard::num]
     adapter, chosen = selected_adapter(c, unit)
     started = time.monotonic()
     model = students.load(c.spec.student, device(), adapter=adapter)
     # same longest-first batching as the teacher stage, on this shard's rows only
     sub = table.subset(rows)
-    scores = aa20_logits(model, sub, batch=8)
+    scores = aa20_logits(model, sub, structures, batch=8)
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.with_name(target.name + ".tmp.npz")
     np.savez(tmp, rows=rows.astype(np.int64), scores=scores, shard=np.int64(shard), num_shards=np.int64(num))
     tmp.replace(target)
-    # the .json is written last: it is what marks the shard as done
-    write_json(target.with_suffix(".json"), {
+    record = {
         "unit": unit, "dataset": dataset, "shard": shard, "num_shards": num, "contexts": int(len(rows)),
         "of": int(len(table)), "adapter_step": None if chosen is None else chosen["step"],
         "scores_sha256": file_sha256(target), "seconds": round(time.monotonic() - started, 1),
-        "peak_gpu_memory_gb": peak_gpu_gb(), "dms_labels_opened": False, "provenance": provenance()})
+        "peak_gpu_memory_gb": peak_gpu_gb(), "dms_labels_opened": False, "provenance": provenance()}
+    if structures is not None:
+        record["structures_digest"] = c.structures_digest()
+    # the .json is written last: it is what marks the shard as done
+    write_json(target.with_suffix(".json"), record)
     print(f"scored {len(rows)} contexts ({unit}, {dataset}, shard {shard + 1}/{num})", flush=True)
 
 

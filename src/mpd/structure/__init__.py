@@ -24,7 +24,10 @@ def _structure_check(dataset: str, home: Path, cluster: str | None, explicit_hom
         count = len(list(folder.glob("*.pdb"))) if folder.is_dir() else 0
         if count:
             return Check("structures:proteingym", "ok", f"{count} ProteinGym AF2 structure files")
-        return Check("structures:proteingym", "error", f"ProteinGym structures not found under {folder}. "
+        archive = next(f for f in sources.PROTEINGYM.files if f.name == "ProteinGym_AF2_structures.zip")
+        return Check("structures:proteingym", "error",
+                     f"ProteinGym structures not found under {folder}. They are the official AF2 models "
+                     f"({archive.name}, {archive.size / 1e6:.1f} MB), part of the ProteinGym download. "
                      f"Run on a login node: mpd fetch proteingym {where}", fix=f"mpd fetch proteingym {where}")
     manifest = home / "data" / sources.VENUS_STRUCTURES.dirname / vs.MANIFEST_NAME
     if manifest.is_file():

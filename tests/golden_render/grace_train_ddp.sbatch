@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=mpd-train-esm2650m
-#SBATCH --comment=mpd:esm2-3b__esm2-650m__proteingym-score-all__seed20260922__26b9eaa0__44578a83:0123456789ab:train
+#SBATCH --comment=mpd:esm2-3b__esm2-650m__proteingym-score-all__seed20260922__26b9eaa0__64b12982:0123456789ab:train
 #SBATCH --time=05:15:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -9,8 +9,8 @@
 #SBATCH --gres=gpu:a100:2
 #SBATCH --partition=gpu
 #SBATCH --account=123456789012
-#SBATCH --output=/nonexistent/mpd/runs/esm2-3b__esm2-650m__proteingym-score-all__seed20260922__26b9eaa0__44578a83/logs/%x_%j.out
-#SBATCH --error=/nonexistent/mpd/runs/esm2-3b__esm2-650m__proteingym-score-all__seed20260922__26b9eaa0__44578a83/logs/%x_%j.err
+#SBATCH --output=/nonexistent/mpd/runs/esm2-3b__esm2-650m__proteingym-score-all__seed20260922__26b9eaa0__64b12982/logs/%x_%j.out
+#SBATCH --error=/nonexistent/mpd/runs/esm2-3b__esm2-650m__proteingym-score-all__seed20260922__26b9eaa0__64b12982/logs/%x_%j.err
 #SBATCH --open-mode=append
 #SBATCH --exclude=g001
 
@@ -27,7 +27,7 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True MPD_REQUIRE_CUDA=1
 export NCCL_DEBUG=WARN
 nvidia-smi -L || { echo "MPD_NO_GPU: no usable GPU on $(hostname -s); resubmit with --sbatch-arg=--exclude=$(hostname -s)" >&2; exit 31; }
 echo "MPD_JOB_START host=$(hostname) job=${SLURM_JOB_ID:-} stage=train"
-cd /nonexistent/mpd/runs/esm2-3b__esm2-650m__proteingym-score-all__seed20260922__26b9eaa0__44578a83
+cd /nonexistent/mpd/runs/esm2-3b__esm2-650m__proteingym-score-all__seed20260922__26b9eaa0__64b12982
 
-/env/bin/python -m torch.distributed.run --standalone --nnodes=1 --nproc_per_node=2 -m mpd.stages.train --campaign-dir /nonexistent/mpd/runs/esm2-3b__esm2-650m__proteingym-score-all__seed20260922__26b9eaa0__44578a83 --stage train --task-index 0
+/env/bin/python -m torch.distributed.run --standalone --nnodes=1 --nproc_per_node=2 -m mpd.stages.train --campaign-dir /nonexistent/mpd/runs/esm2-3b__esm2-650m__proteingym-score-all__seed20260922__26b9eaa0__64b12982 --stage train --task-index 0
 echo "MPD_STAGE_DONE train"

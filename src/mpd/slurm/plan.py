@@ -32,12 +32,15 @@ ACT_REFERENCE_MICROBATCH = 2  # ModelInfo.act_gb is for micro-batch 2 and scales
 INFERENCE_ACT_FRACTION = 0.2  # no_grad batch-8 activations as a share of act_gb: about 5 GB for 3B, 2 GB for 650M (gpu_path_audit M1)
 
 # What the job scripts export from the submitting shell (values are read when the scripts are rendered), besides MPD_MODEL_<KEY>.
+# MPD_STRUCTURE_LEGACY_MASK is deliberately absent: it reproduces an earlier, wrong input and changes results, so a job gets it
+# only through an explicit --env (a stale export in a shell must not reach a campaign).
 FORWARDED_ENV = ("MPD_MODELS_DIR", "MPD_FOLDSEEK", "MPD_3DI_ENGINE", "MPD_DTYPE", "MPD_KEEP_ALL_CHECKPOINTS", "MPD_TF32",
-                 "MPD_CKPT_EVERY", "MPD_STRUCTURE_LEGACY_MASK")
+                 "MPD_CKPT_EVERY")
 FORWARDED_PREFIX = "MPD_MODEL_"
-_DIR_ENV = ("MPD_MODELS_DIR",)                 # always a path; MPD_MODEL_<KEY> too. MPD_FOLDSEEK may be a bare command name
+_DIR_ENV = ("MPD_MODELS_DIR", "MPD_FOLDSEEK")  # always a path (a job changes directory); MPD_MODEL_<KEY> too. A bare name is not looked up on PATH
 RESERVED_ENV = {"MPD_ALLOW_HUB": "it is for login nodes and laptops; jobs run offline (HF_HUB_OFFLINE=1)"}
 _NUMERICS_ENV = ("MPD_DTYPE", "MPD_TF32", "MPD_STRUCTURE_LEGACY_MASK")      # change results, so they are part of a campaign's identity
+_FLAG_ENV = ("MPD_TF32", "MPD_STRUCTURE_LEGACY_MASK")                       # the code reads these as "== 1"; anything else is off
 
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _SAFE_ID = re.compile(r"[A-Za-z0-9_.+-]+")
@@ -61,6 +64,14 @@ def check_env(name: str, value: str) -> None:
         raise PlanError(f"{name} cannot be set for jobs: {RESERVED_ENV[name]}")
     if not isinstance(value, str) or len(value) > MAX_ENV_VALUE or any((ord(c) < 32 and c != "\t") or ord(c) == 127 for c in value):
         raise PlanError(f"the value of {name} must be one line of at most {MAX_ENV_VALUE} characters without control characters")
+
+
+def check_env_path(name: str, value: str) -> None:
+    """A --env value that names a file or folder (MPD_MODELS_DIR, MPD_FOLDSEEK, MPD_MODEL_<KEY>) must be absolute: a job runs
+    in the campaign folder, so a relative path would not mean what it means in the shell. (A variable of the shell is made
+    absolute by `forwarded_env` instead.)"""
+    if (name in _DIR_ENV or name.startswith(FORWARDED_PREFIX)) and value and not value.startswith("/"):
+        raise PlanError(f"--env {name}={value} is a relative path; jobs change directory, so it would not resolve. Give an absolute path")
 
 
 def parse_env_pair(text: str) -> tuple[str, str]:
@@ -184,7 +195,7 @@ class Plan:
     resolved: dict
     warnings: list[str]
     nonce: str = ""                # per-submission; written into every job's --comment
-    campaign_id: str = ""          # spec.campaign_id() + "__" + hash of the options that change tasks or scripts
+    campaign_id: str = ""          # spec.campaign_id() + "__" + hash of the options that change RESULTS (see _identity), not scheduling
     env_record: dict | None = None # <home>/env/mpd_env.json when it exists and fits this cluster and home
 
     @property
@@ -218,7 +229,7 @@ def forwarded_env(environ=None) -> dict[str, str]:
         if name in FORWARDED_ENV or (name.startswith(FORWARDED_PREFIX) and _ENV_NAME.fullmatch(name)):
             value = environ[name]
             check_env(name, value)
-            if name in _DIR_ENV or name.startswith(FORWARDED_PREFIX) or (name == "MPD_FOLDSEEK" and "/" in value):
+            if value and (name in _DIR_ENV or name.startswith(FORWARDED_PREFIX)):       # an empty variable is "unset", not the current folder
                 value = os.path.abspath(os.path.expanduser(value))
             out[name] = value
     return out
@@ -364,20 +375,21 @@ def _usable_record(home: Path, cluster: Cluster) -> tuple[dict | None, str | Non
     return record, None
 
 
-def _identity(spec: RunSpec, options: PlanOptions, gpu: GpuType, dp: int, shards: dict, throttle: int,
-              user_seconds: dict, planner_env: dict) -> str:
-    """Eight hex digits of everything that changes the tasks or scripts of a campaign but is not already in
-    ``spec.campaign_id()``: evaluation data, cluster, GPU type, training width, score shards, array throttle, walltime
-    overrides, extra sbatch options, extra modules and --env pairs, and the numerics variables (MPD_DTYPE, MPD_TF32,
-    MPD_STRUCTURE_LEGACY_MASK).
-    Deliberately absent: home, python, account and nonce, so moving or re-pointing a campaign keeps its identity."""
+def _identity(spec: RunSpec, options: PlanOptions, gpu: GpuType, dp: int, shards: dict, planner_env: dict) -> str:
+    """Eight hex digits of what can change the RESULTS of a campaign, or where they are written, and is not already in
+    ``spec.campaign_id()``: evaluation data, cluster, GPU type, training width, score shards, and the numerics variables
+    (MPD_DTYPE, MPD_TF32, MPD_STRUCTURE_LEGACY_MASK) as the jobs will see them.
+    Deliberately absent: everything that only decides when and where a job runs (the three walltime overrides,
+    --array-throttle, --sbatch-arg, --module, the other --env pairs, the account) and home, python and the nonce. The natural
+    recoveries, a longer --train-time after TIMEOUT or --sbatch-arg=--exclude=NODE after a bad node, must stay in the same
+    campaign so that finished stages and training checkpoints are reused. Nothing under tasks/, resolved.json or spec.json
+    may depend on an absent option: `--force` rewrites only the scripts and plan.json."""
     env = {**planner_env, **options.extra_env}
+    numerics = {k: env[k] for k in _NUMERICS_ENV if k not in _FLAG_ENV and env.get(k)}
+    numerics.update({k: "1" for k in _FLAG_ENV if env.get(k) == "1"})
     payload = {
         "eval_data": sorted(spec.eval_data), "cluster": options.cluster.name, "gpu": gpu.name, "train_gpus": dp,
-        "score_shards": {ds: shards[ds] for ds in sorted(spec.eval_data)}, "array_throttle": throttle,
-        "walltimes": user_seconds, "extra_sbatch": list(options.extra_sbatch), "extra_modules": list(options.extra_modules),
-        "extra_env": {k: v for k, v in sorted(options.extra_env.items()) if k not in _NUMERICS_ENV},
-        "numerics": {k: env[k] for k in _NUMERICS_ENV if k in env},
+        "score_shards": {ds: shards[ds] for ds in sorted(spec.eval_data)}, "numerics": numerics,
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:8]
 
@@ -410,6 +422,7 @@ def make_plan(spec: RunSpec, options: PlanOptions) -> Plan:
     extra_modules = tuple(validate_module(m) for m in options.extra_modules)
     for name, value in options.extra_env.items():
         check_env(name, value)
+        check_env_path(name, value)
     if options.nonce and not _NONCE.fullmatch(options.nonce):
         raise PlanError(f"nonce {options.nonce!r} must be 6-32 letters or digits")
     env = dict(options.extra_env)
@@ -418,6 +431,9 @@ def make_plan(spec: RunSpec, options: PlanOptions) -> Plan:
     options = replace(options, home=home, python=python, account=account, extra_sbatch=extra_sbatch,
                       extra_modules=extra_modules, extra_env=env)
     planner_env, _ = job_env(options)
+    if os.environ.get("MPD_STRUCTURE_LEGACY_MASK") == "1" and "MPD_STRUCTURE_LEGACY_MASK" not in env:
+        warnings.append("MPD_STRUCTURE_LEGACY_MASK is set in this shell but jobs do not inherit it: it changes results, so it has "
+                        "to be asked for with --env MPD_STRUCTURE_LEGACY_MASK=1 (which also gives the campaign its own id)")
     for flag in extra_sbatch:
         if flag.split("=", 1)[0] in _PLANNED_FLAGS:
             warnings.append(f"--sbatch-arg {flag} overrides a value mpd chose; the plan's resources, walltime and SU figures "
@@ -484,7 +500,7 @@ def make_plan(spec: RunSpec, options: PlanOptions) -> Plan:
     accumulation = global_batch // per_step
     train_gpus = train_gpus_model if student.shard_across_gpus else dp
 
-    campaign_id = f"{spec.campaign_id()}__{_identity(spec, options, gpu, dp, shards, throttle, user_seconds, planner_env)}"
+    campaign_id = f"{spec.campaign_id()}__{_identity(spec, options, gpu, dp, shards, planner_env)}"
     if not _SAFE_ID.fullmatch(campaign_id):
         raise PlanError(f"campaign id {campaign_id!r} has characters outside letters, digits and _ . + -; check the assay ids")
     campaign_dir = home / "runs" / campaign_id
@@ -613,6 +629,13 @@ def make_plan(spec: RunSpec, options: PlanOptions) -> Plan:
                 warnings=list(dict.fromkeys(warnings)), nonce=nonce, campaign_id=campaign_id, env_record=record)
 
 
+# What `describe` says about the campaign id; docs and tests quote it. It must stay true to `_identity`.
+ID_NOTE = ("campaign id: a new --eval-data, --gpu, --train-gpus or --score-shards (or MPD_DTYPE, MPD_TF32, --env MPD_STRUCTURE_LEGACY_MASK=1) "
+           "is a new campaign and trains again from the start.",
+           "  Walltimes, --array-throttle, --sbatch-arg, --module, other --env pairs and --account keep the id: `mpd submit --force` applies them "
+           "to the stages it queues again.")
+
+
 def describe(plan: Plan) -> str:
     c = plan.options.cluster
     modules = f"   modules {' '.join(plan.modules)}" if plan.modules else ""
@@ -642,6 +665,7 @@ def describe(plan: Plan) -> str:
                   "\"Requested SUs\" line that counts CPUs only, so it is lower than the total above; `myproject` shows your balance."]
     else:
         lines.append(f"estimated upper bound: not billed (the {c.name} profile has no SU rates)")
+    lines += ID_NOTE
     for w in plan.warnings:
         lines.append(f"warning: {w}")
     return "\n".join(lines)

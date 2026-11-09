@@ -311,6 +311,8 @@ class JobState:
     exitcode: str = ""
     name: str = ""
     detail: str = ""        # for an array: "7 COMPLETED, 2 RUNNING, 1 FAILED"
+    limit: str = ""         # the time limit the job was submitted with, as sacct prints it ("08:00:00", "1-00:00:00"); "" when unknown
+    node: str = ""          # where it ran (sacct NodeList); "" when it never ran or sacct did not say
 
 
 _SEVERITY = ("FAILED", "TIMEOUT", "OUT_OF_MEMORY", "NODE_FAIL", "BOOT_FAIL", "DEADLINE", "CANCELLED", "REVOKED")
@@ -347,6 +349,12 @@ def _task_count(job_id: str) -> int:
     return total
 
 
+def _column(cols: list[str], index: int) -> str:
+    """An optional sacct column; Slurm's placeholders for "none" are read as empty."""
+    value = cols[index].strip() if index < len(cols) else ""
+    return "" if value in ("None assigned", "None", "Unknown", "UNLIMITED", "Partition_Limit") else value
+
+
 def _parse_sacct(text: str, wanted: set[str]) -> dict[str, JobState]:
     groups: dict[str, list[list[str]]] = {}
     for line in text.splitlines():
@@ -362,9 +370,15 @@ def _parse_sacct(text: str, wanted: set[str]) -> dict[str, JobState]:
             counts[state] = counts.get(state, 0) + _task_count(cols[0])
         exit_codes = [c[4] for c in rows if c[4] and c[4] != "0:0"]
         detail = ", ".join(f"{n} {s}" for s, n in sorted(counts.items(), key=lambda kv: -kv[1])) if sum(counts.values()) > 1 else ""
-        out[job] = JobState(_headline(counts), max((c[3] for c in rows), key=_seconds), (exit_codes or ["0:0"])[0],
-                            rows[0][1], detail)
+        headline = _headline(counts)
+        node = next((_column(c, 6) for c in rows if _column(c, 6) and (c[2].split() or [""])[0].rstrip("+") == headline), "")
+        out[job] = JobState(headline, max((c[3] for c in rows), key=_seconds), (exit_codes or ["0:0"])[0], rows[0][1], detail,
+                            _column(rows[0], 5), node)
     return out
+
+
+SACCT_FIELDS_BASIC = "JobID,JobName,State,Elapsed,ExitCode"
+SACCT_FIELDS = SACCT_FIELDS_BASIC + ",Timelimit,NodeList"
 
 
 def job_states(job_ids, *, sacct: str = "sacct", squeue: str | None = "squeue") -> dict[str, JobState]:
@@ -374,9 +388,11 @@ def job_states(job_ids, *, sacct: str = "sacct", squeue: str | None = "squeue") 
     if not ids:
         return {}
     out: dict[str, JobState] = {}
-    proc = run_tool([sacct, "-X", "-n", "-P", "-j", ",".join(ids), "--format=JobID,JobName,State,Elapsed,ExitCode"], timeout=60)
-    if proc.returncode == 0:
-        out = _parse_sacct(proc.stdout, set(ids))
+    for fields in (SACCT_FIELDS, SACCT_FIELDS_BASIC):        # the extra columns are a bonus: a sacct that refuses them still answers
+        proc = run_tool([sacct, "-X", "-n", "-P", "-j", ",".join(ids), f"--format={fields}"], timeout=60)
+        if proc.returncode == 0:
+            out = _parse_sacct(proc.stdout, set(ids))
+            break
     if squeue and any(j not in out for j in ids):
         rows, _ = read_queue(squeue)
         for r in rows or []:
@@ -385,11 +401,13 @@ def job_states(job_ids, *, sacct: str = "sacct", squeue: str | None = "squeue") 
     return out
 
 
-def pending_reasons(job_ids, *, squeue: str = "squeue") -> dict[str, str]:
-    """Why each pending job waits (Dependency, Priority, Resources, PartitionTimeLimit, ...). Other jobs are absent."""
+def pending_reasons(job_ids, *, squeue: str = "squeue", any_state: bool = False) -> dict[str, str]:
+    """Why each pending job waits (Dependency, Priority, Resources, PartitionTimeLimit, ...). Other jobs are absent, unless
+    `any_state`: then every job squeue still remembers with a reason other than None (TimeLimit, DependencyNeverSatisfied, ...)."""
     wanted = {str(j) for j in job_ids}
     rows, _ = read_queue(squeue)
-    return {r.job_id: r.reason for r in rows or [] if r.state == "PENDING" and r.job_id in wanted and r.reason}
+    return {r.job_id: r.reason for r in rows or [] if r.job_id in wanted and r.reason
+            and (r.state == "PENDING" or (any_state and r.reason != "None"))}
 
 
 # ---------------------------------------------------------------- progress on disk
@@ -442,6 +460,17 @@ def _load_json(path: Path):
         return None
 
 
+def stage_plan(campaign_dir) -> dict[str, dict]:
+    """plan.json's record of each stage by full stage name (walltime_s, gpu, mem_gb, depends_on, partition_limit_s, ...); {} when
+    the file is missing or unreadable."""
+    data = _load_json(Path(campaign_dir) / "plan.json")
+    out = {}
+    for rec in (data.get("stages") if isinstance(data, dict) else None) or []:
+        if isinstance(rec, dict) and rec.get("name"):
+            out[rec["name"] + (f".{rec['part']}" if rec.get("part") else "")] = rec
+    return out
+
+
 # ---------------------------------------------------------------- logs
 _LOG_NAME = re.compile(r"^mpd-(?P<stage>.+)-[^-_]+_(?P<job>\d+)(?:_\d+)?\.(?P<ext>err|out)$")     # mpd-<stage>-<student>_<job>[_<task>].err|out
 
@@ -450,16 +479,17 @@ def _stage_matches(wanted: str, full: str) -> bool:
     return full == wanted or full.split(".")[0] == wanted
 
 
-def stage_log(campaign_dir, stage: str, *, err: bool = True) -> Path | None:
+def stage_log(campaign_dir, stage: str, *, err: bool = True, job: str | None = None) -> Path | None:
     """The log of a stage: the newest non-empty one (an array has one per task), else the newest. `stage` is a full stage
-    name (score.1) or a base name (score, which then covers its chunks but not score-base)."""
+    name (score.1) or a base name (score, which then covers its chunks but not score-base). With `job`, only that job's logs
+    count, so a job that never ran does not show the text of an earlier attempt."""
     root = Path(campaign_dir)
     marker = read_marker(root) or {}
     ids = {str(v) for k, v in (marker.get("jobs") or {}).items() if _stage_matches(stage, str(k))}
     files = []
     for p in (root / "logs").glob("*.err" if err else "*.out") if (root / "logs").is_dir() else []:
         m = _LOG_NAME.match(p.name)
-        if m and (m.group("job") in ids or _stage_matches(stage, m.group("stage"))):
+        if m and (m.group("job") in ids or _stage_matches(stage, m.group("stage"))) and (job is None or m.group("job") == str(job)):
             files.append(p)
     if not files:
         return None
@@ -471,9 +501,9 @@ def failure_log(campaign_dir, stage: str) -> Path | None:
     return stage_log(campaign_dir, stage, err=True)
 
 
-def log_tail(campaign_dir, stage: str, n: int = 20, *, err: bool = True) -> str:
+def log_tail(campaign_dir, stage: str, n: int = 20, *, err: bool = True, job: str | None = None) -> str:
     """Last n lines of the stage's log, with account numbers and the user name scrubbed. "" when there is none."""
-    log = stage_log(campaign_dir, stage, err=err)
+    log = stage_log(campaign_dir, stage, err=err, job=job)
     if log is None:
         return ""
     with open(log, "rb") as fh:
@@ -487,9 +517,239 @@ def log_tail(campaign_dir, stage: str, n: int = 20, *, err: bool = True) -> str:
     return scrub("\n".join(lines), _accounts_in_scripts(Path(campaign_dir)))
 
 
-def failure_tail(campaign_dir, stage: str, n: int = 20) -> str:
+def failure_tail(campaign_dir, stage: str, n: int = 20, *, job: str | None = None) -> str:
     """Last n lines of the stage's error log (what a failed job printed), scrubbed."""
-    return log_tail(campaign_dir, stage, n, err=True)
+    return log_tail(campaign_dir, stage, n, err=True, job=job)
+
+
+# ---------------------------------------------------------------- what `mpd status` tells a student to do next
+# The words live here, in dicts and two short functions, so that the docs and the tests quote the same text. None of it was
+# checked on Grace. State and reason names are Slurm's (squeue(1), JOB REASON CODES and JOB STATE CODES, Slurm 25.05). The cause of
+# a failure is read from the markers mpd's own scripts and stages print (MPD_NO_GPU, MPD_MODULE_LOAD_FAILED, the weights error)
+# and from well-known Python messages; a cause or a reason that is not known is shown as it is.
+NO_GPU_EXIT = 31                # stages.common.NO_GPU_EXIT (a test keeps the two equal)
+TIME_FLAGS = {"train": "--train-time", "teacher": "--teacher-time", "score": "--score-time", "score-base": "--score-time"}
+
+ADVICE = {
+    "again": "Run your original `mpd submit ...` command again",
+    # a job that hit its time limit
+    "timeout": "{head} reached its time limit: it ran {elapsed} of the {limit} it asked for.",
+    "timeout_unknown": "{head} reached its time limit after {elapsed}.",
+    "timeout_estimate": "That limit was mpd's estimate, not a measurement.",
+    "resume_train": "Training saves its progress every MPD_CKPT_EVERY updates (200 unless you changed it) and continues from the latest "
+                    "save, so the work done so far is kept.",
+    "resume_score": "Scoring keeps the shards it finished; only the unfinished ones run again.",
+    "resume_teacher": "The teacher writes its table only when its whole pass is done, so a new attempt starts from the beginning and "
+                      "the limit has to cover all of it.",
+    "timeout_retry": "{again} with a larger {flag} (for example {flag} {example}; this partition allows up to {biggest}) and --force.",
+    "timeout_retry_unknown_max": "{again} with a larger {flag} (for example {flag} {example}) and --force.",
+    "timeout_at_maximum_train": "It already asked for the longest time this partition allows ({biggest}). Run the same command with "
+                                "--force again: every attempt continues from the latest save.",
+    "timeout_at_maximum": "It already asked for the longest time this partition allows ({biggest}). Use more shards (--score-shards) "
+                          "or a faster GPU (--gpu) so that one task fits.",
+    "timeout_no_flag": "This stage has no time option of its own. Report it with `mpd doctor --report` and the end of its log.",
+    # out of memory
+    "oom": "{head} ran out of memory{oom_code}.",
+    "oom_gpu": "The GPU's memory is too small for this model at this size: use a smaller student or a larger GPU (--gpu; `mpd clusters` "
+               "lists them). More GPUs do not help, because every GPU holds a full copy of the model. mpd's memory figures are "
+               "estimates, not measurements. Then {again_l} with --force.",
+    "oom_unknown": "If its log mentions CUDA, the GPU is too small for this model at this size: use a smaller student or a larger GPU "
+                   "(--gpu; `mpd clusters` lists them). More GPUs do not help, because every GPU holds a full copy of the model. "
+                   "If it does not, the node ran out of host memory{mem}: add --sbatch-arg=--mem=<more>G. mpd's memory figures are "
+                   "estimates, not measurements. Then {again_l} with --force.",
+    # the node
+    "node_fail": "{head} ended with {state}: the node it ran{where} failed, which is not a problem with your settings.",
+    "node_retry": "{again} with --force.{exclude}",
+    "node_exclude": " If it lands on {node} again, add --sbatch-arg=--exclude={node}.",
+    # a job that exited with an error
+    "failed": "{head} failed{code}.",
+    "failed_unknown": "The end of its error log is above; `mpd logs {ref} {base} --err` shows all of it. When the cause is fixed, "
+                      "{again_l} with --force: finished stages are kept.",
+    # a job that was cancelled
+    "cancelled_dependency": "{head} was cancelled because a stage it waited for did not finish.",
+    "cancelled_dependency_next": "Nothing to do for this stage until that one is fixed; then {again_l} with --force.",
+    "cancelled_all": "{stages}: cancelled with `mpd cancel`.",
+    "cancelled": "{head} was cancelled: by `mpd cancel`, by an administrator, or by a limit of the account.",
+    "cancelled_next": "{again} to queue the campaign again.",
+    "cancelled_next_running": "{again} with --force to queue what is missing.",
+    "other": "{head} ended with state {state}, which mpd has no advice for.",
+    "other_next": "`mpd logs {ref} {base} --err` shows the end of its log; then {again_l} with --force.",
+}
+
+# What a failed job's log says about the cause: the first match wins; the names are the keys of CAUSE_ADVICE.
+CAUSES = (
+    ("no_gpu", re.compile(r"MPD_NO_GPU")),
+    ("module", re.compile(r"MPD_MODULE_LOAD_FAILED")),
+    ("weights", re.compile(r"weights for \S+ (?:are|have) |mpd cannot fetch weights")),
+    ("offline", re.compile(r"huggingface\.co|OfflineModeIsEnabled|offline mode is enabled|LocalEntryNotFoundError", re.I)),
+    ("cuda_oom", re.compile(r"CUDA out of memory|OutOfMemoryError")),
+)
+CAUSE_ADVICE = {
+    "no_gpu": "The node has no usable GPU (the job stopped instead of running on the CPU). {again} with "
+              "--sbatch-arg=--exclude={node} and --force.",
+    "module": "A module the job needs could not be loaded. The modules come from the environment record: `mpd doctor` shows it (row "
+              "env-record) and `bash scripts/setup_env.sh --cluster {cluster}` writes it again. Then {again_l} with --force.",
+    "weights": "The job needed model weights that are not on disk, and compute nodes are offline. On a login node run `{fetch}`, then "
+               "{again_l} with --force.",
+    "offline": "The job tried to reach huggingface.co, which compute nodes cannot do. The weights have to be on disk first: on a login "
+               "node run `{fetch}`, then {again_l} with --force.",
+}
+# Text from a log is advice only if it is a plain command or node name: a log can hold anything, and what is shown is meant to be pasted.
+_FETCH = re.compile(r"(mpd fetch model [^\n]+)")
+_SAFE_FETCH = re.compile(r"mpd fetch model(?: [A-Za-z0-9._-]+)+(?: --cluster [A-Za-z0-9._-]+)?(?: --home [A-Za-z0-9._/+@:=,-]+)?")
+_SAFE_NODE = re.compile(r"[A-Za-z0-9_.,\[\]-]+")
+_NODE_IN_ERR = re.compile(r"MPD_NO_GPU: no usable GPU on (\S+?);")
+_NODE_IN_OUT = re.compile(r"MPD_JOB_START host=(\S+)")
+
+# One line per Slurm reason a job waits for. `{ref}` is the campaign as the user types it. Keys are matched on the first word of
+# squeue's reason ("ReqNodeNotAvail, UnavailableNodes:g001" is ReqNodeNotAvail).
+PENDING_REASONS = {
+    "Priority": "other jobs are ahead of it; this is the usual wait for a GPU. Nothing to do.",
+    "Resources": "it is next in line and waits for a node with the GPU it asked for. Nothing to do.",
+    "Dependency": "it waits for the stage or stages before it to finish. Nothing to do.",
+    "JobArrayTaskLimit": "the array already runs as many tasks at once as its throttle allows (--array-throttle); the rest start as "
+                         "tasks finish. Nothing to do.",
+    "DependencyNeverSatisfied": "a stage it waited for failed or was cancelled, so it will never start. Fix that stage, then run your "
+                                "original `mpd submit ...` command again with --force.",
+    "PartitionTimeLimit": "its time limit is longer than the partition allows, so Slurm will never start it. `mpd cancel {ref}`, then "
+                          "submit again with a shorter walltime.",
+    "ReqNodeNotAvail": "a node it needs is not available (down, drained or reserved). If you excluded nodes with "
+                       "--sbatch-arg=--exclude=..., check the names; otherwise wait or ask the cluster's support.",
+    "BeginTime": "its start time has not been reached. Nothing to do.",
+    "JobHeldUser": "it is held; `scontrol release <job id>` frees it.",
+    "JobHeldAdmin": "an administrator holds it; ask the cluster's support.",
+    "InvalidAccount": "Slurm does not accept the account. `myproject` lists yours; `mpd cancel {ref}`, then submit again with --account.",
+    "InvalidQOS": "Slurm does not accept the QOS. `mpd cancel {ref}`, then submit again without --sbatch-arg=--qos=...",
+    "PartitionDown": "its partition is down. Wait, or ask the cluster's support.",
+    "PartitionNodeLimit": "its node request is outside what the partition allows, or nodes are down. Ask the cluster's support.",
+    "NodeDown": "a node it needs is down. Wait, or ask the cluster's support.",
+    "Reservation": "it waits for an advance reservation. Nothing to do.",
+    "Licenses": "it waits for a software license. Nothing to do.",
+}
+# Reasons that come in families (AssocGrpBillingMinutes, QOSMaxJobsPerUserLimit, ...); the first pattern that matches wins.
+PENDING_FAMILIES = (
+    (re.compile(r"balance|^Assoc\w*Minutes", re.I),
+     "the account's SU balance, or a limit on its minutes, cannot cover the job. `myproject` shows the balance; reduce the plan or "
+     "ask the cluster's support for more SUs."),
+    (re.compile(r"^Assoc"), "a limit of your account (jobs or resources at once) holds it. It starts when your other jobs end."),
+    (re.compile(r"^QOS"), "a limit of its QOS (jobs or GPUs per user at once) holds it back. It starts when your other jobs end."),
+)
+
+
+def find_cause(*texts: str) -> str | None:
+    """The first known cause that shows in the given log texts (stderr first), else None."""
+    for text in texts:
+        for name, pattern in CAUSES:
+            if pattern.search(text or ""):
+                return name
+    return None
+
+
+def pending_help(reason: str, ref: str = "<campaign>") -> str:
+    """One line on why a job waits. A reason that is not known is shown as Slurm says it."""
+    reason = reason.strip().strip("()")
+    word = re.split(r"[,\s]", reason, maxsplit=1)[0]
+    text = PENDING_REASONS.get(word) or next((t for p, t in PENDING_FAMILIES if p.search(word) or p.search(reason)), None)
+    if text is None:
+        return f"Slurm says: {reason}"
+    return text.format(ref=ref) + (f" (Slurm: {reason})" if reason != word else "")
+
+
+def exit_info(exitcode: str) -> tuple[int, int]:
+    """(exit status, signal) from sacct's ExitCode "status:signal"; (0, 0) for anything unreadable."""
+    status, _, signal = (exitcode or "").partition(":")
+    try:
+        return int(status or 0), int(signal or 0)
+    except ValueError:
+        return 0, 0
+
+
+def node_of(state: JobState | None, err: str = "", out: str = "") -> str:
+    """Where a job ran: sacct's NodeList, else the node in the script's own MPD_NO_GPU line, else the host the job announced."""
+    m = _NODE_IN_ERR.search(err or "") or _NODE_IN_OUT.search(out or "")
+    node = state.node if state is not None and state.node else (m.group(1).split(".")[0] if m else "")
+    return node if _SAFE_NODE.fullmatch(node) else ""
+
+
+def _fmt_walltime(seconds: int) -> str:
+    days, rem = divmod(int(seconds), 86400)
+    return (f"{days}-" if days else "") + f"{rem // 3600:02d}:{rem % 3600 // 60:02d}:{rem % 60:02d}"
+
+
+def _timeout_lines(say, base: str, state: JobState, plan: dict) -> list[str]:
+    limit_s = _seconds(state.limit) or int(plan.get("walltime_s") or 0)
+    biggest = int(plan.get("partition_limit_s") or 0)
+    lines = [say("timeout", limit=_fmt_walltime(limit_s)) if limit_s else say("timeout_unknown")]
+    if plan.get("walltime_basis") in ("estimate", "measured"):
+        lines[0] += " " + ADVICE["timeout_estimate"]
+    if base in TIME_FLAGS:
+        lines.append(ADVICE["resume_" + ("score" if base == "score-base" else base)])
+    flag = TIME_FLAGS.get(base)
+    if not flag:
+        lines.append(ADVICE["timeout_no_flag"])
+    elif biggest and limit_s >= biggest:
+        lines.append(say("timeout_at_maximum_train" if base == "train" else "timeout_at_maximum", biggest=_fmt_walltime(biggest)))
+    else:
+        twice = -(-2 * limit_s // 3600) * 3600 if limit_s else 8 * 3600
+        example = _fmt_walltime(min(twice, biggest) if biggest else twice)
+        lines.append(say("timeout_retry", flag=flag, example=example, biggest=_fmt_walltime(biggest)) if biggest
+                     else say("timeout_retry_unknown_max", flag=flag, example=example))
+    return lines
+
+
+def advise_cancelled(stages: list[str]) -> list[str]:
+    """The two lines for a campaign that `mpd cancel` stopped: one sentence for all its cancelled stages instead of one each."""
+    return [ADVICE["cancelled_all"].format(stages=", ".join(stages)), ADVICE["cancelled_next"].format(again=ADVICE["again"])]
+
+
+def advise(stage: str, job: str, state: JobState | None, *, ref: str, reason: str = "", err: str = "", out: str = "",
+           plan: dict | None = None, cluster: str = "", cancelled: bool = False) -> list[str]:
+    """Plain-words lines for a stage that did not end well: what happened, then the command that continues.
+
+    `plan` is the stage's record in plan.json (walltime_s, mem_gb, partition_limit_s, walltime_basis); `err` and `out` are the ends
+    of its logs; `reason` is squeue's reason for the job; `cancelled` says the campaign was cancelled with `mpd cancel`. The first
+    line says what happened. An empty list means the state needs no advice."""
+    plan = plan or {}
+    base = stage.split(".")[0]
+    word = state.state.split()[0] if state and state.state else ""
+    status, signal = exit_info(state.exitcode if state else "")
+    cause = find_cause(err, out)
+    node = node_of(state, err, out)
+    again = ADVICE["again"]
+    ctx = dict(head=f"{stage} (job {job})", elapsed=(state.elapsed if state and state.elapsed else "?"), again=again,
+               again_l=again[0].lower() + again[1:], ref=ref, base=base, state=word, node=node or "<node>", cluster=cluster or "<cluster>",
+               code=f" with exit code {status}" if status else "", oom_code=" (exit 137)" if status == 137 else "")
+
+    def say(key: str, **more) -> str:
+        return ADVICE[key].format(**{**ctx, **more})
+
+    killed = status == 137 or signal == 9
+    if word in ("", "COMPLETED", "COMPLETING", "RUNNING", "PENDING", "CONFIGURING"):
+        return []
+    if word == "TIMEOUT":
+        return _timeout_lines(say, base, state, plan)
+    if word == "OUT_OF_MEMORY" or (word == "FAILED" and (cause == "cuda_oom" or (killed and cause is None))):
+        mem = f" (the job asked for {plan['mem_gb']}G)" if plan.get("mem_gb") else ""
+        return [say("oom"), say("oom_gpu") if cause == "cuda_oom" else say("oom_unknown", mem=mem)]
+    if word in ("NODE_FAIL", "BOOT_FAIL"):
+        return [say("node_fail", where=f" on {node}" if node else ""),
+                say("node_retry", exclude=say("node_exclude") if node else "")]
+    if word == "FAILED":
+        lines = [say("failed")]
+        if cause is None and status == NO_GPU_EXIT:
+            cause = "no_gpu"
+        if cause in CAUSE_ADVICE:
+            found = (_FETCH.search(err or "") or _FETCH.search(out or ""))
+            fetch = found.group(1).strip() if found and _SAFE_FETCH.fullmatch(found.group(1).strip()) else "mpd fetch model <KEY>"
+            lines.append(CAUSE_ADVICE[cause].format(**{**ctx, "fetch": fetch}))
+        else:
+            lines.append(say("failed_unknown"))
+        return lines
+    if word == "CANCELLED":
+        if reason == "DependencyNeverSatisfied":
+            return [say("cancelled_dependency"), say("cancelled_dependency_next")]
+        return [say("cancelled"), say("cancelled_next" if cancelled else "cancelled_next_running")]
+    return [say("other"), say("other_next")] if word else []
 
 
 # ---------------------------------------------------------------- cancel
@@ -507,7 +767,7 @@ def cancel(campaign_dir, *, scancel: str = "scancel", squeue: str = "squeue", ec
     if rows is None:
         if not recorded:
             raise SubmitError(f"squeue did not answer ({why}) and no job ids are recorded for {cid}, so its jobs cannot be found. "
-                              f"Run `mpd cancel {cid}` again when `squeue -u $USER` works")
+                              f"Run `mpd cancel {cid}` again when `squeue -u $USER` answers")
         # cannot tell what is alive: ask scancel about the recorded ids (it ignores finished ones)
         echo(f"squeue did not answer ({why}); cancelling the recorded jobs without checking the queue")
         targets = recorded

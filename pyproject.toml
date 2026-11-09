@@ -72,6 +72,7 @@ testpaths = ["tests"]
 markers = [
     "gpu: needs a CUDA device",
     "slow: loads a real pretrained checkpoint (needs network or a populated cache)",
+    "rehearsal: runs the job scripts that `mpd submit` writes, end to end on the CPU with tiny models and fake cluster tools",
 ]
 
 [tool.ruff]

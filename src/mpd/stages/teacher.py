@@ -1,8 +1,8 @@
 """Stage `teacher` (GPU): run the frozen teacher once over every training context and store its AA20 logits.
 
 The student never sees the teacher at training time, only this table (cached-target distillation). A finished table
-is reused: the stage does nothing when teacher/COMPLETE.json names this teacher and these contexts, so resubmitting a
-campaign does not pay for the teacher twice.
+is reused: the stage does nothing when teacher/COMPLETE.json names this teacher and these contexts (and, for a teacher
+that reads protein structure, these structure strings), so resubmitting a campaign does not pay for the teacher twice.
 """
 
 from __future__ import annotations
@@ -58,6 +58,11 @@ def teacher_state(c: Campaign, union: ContextTable) -> tuple[dict | None, str]:
     if info.get("context_digest") != union.digest():
         return None, (f"it was computed for contexts {str(info.get('context_digest'))[:12]}, "
                       f"this campaign's union table is {union.digest()[:12]}")
+    if c.needs_structure("teacher"):               # a structure-aware teacher's table depends on the strings it was given
+        now = c.structures_digest()
+        if info.get("structures_digest") != now:
+            return None, (f"it was computed with structures {str(info.get('structures_digest'))[:12]}, this campaign's "
+                          f"structures.json is {'missing' if now is None else now[:12]}")
     if not c.teacher_logits.is_file():
         return None, "teacher/logits.npy does not exist"
     if info.get("logits_sha256") != file_sha256(c.teacher_logits):
@@ -80,6 +85,8 @@ def run(c: Campaign, task: dict) -> None:
     require_cuda()
     configure_torch()
     table = ContextTable.load(c.stem_union())
+    # the training dataset's own strings; read before anything is deleted or loaded, so a campaign without them fails at once
+    structures = c.structures_for("teacher", c.spec.train_data)
     done, why = teacher_state(c, table)
     if done is not None:
         print(f"teacher {c.spec.teacher}: {len(table)} contexts already computed (digest {table.digest()[:12]}); "
@@ -90,13 +97,16 @@ def run(c: Campaign, task: dict) -> None:
         c.teacher_complete.unlink()                # a crash below must not leave a PASS for the old table
     started = time.monotonic()
     model = students.load(c.spec.teacher, device())
-    out = aa20_logits(model, table)
+    out = aa20_logits(model, table, structures)
     save_logits(c.teacher_logits, out)
-    write_json(c.teacher_complete, {
+    record = {
         "status": "PASS", "teacher": c.spec.teacher, "contexts": len(table), "context_digest": table.digest(),
         "logits_sha256": file_sha256(c.teacher_logits), "seconds": round(time.monotonic() - started, 1),
         "dtype": str(next(model.module.parameters()).dtype), "peak_gpu_memory_gb": peak_gpu_gb(),
-        "order": "AA20 = ACDEFGHIKLMNPQRSTVWY, raw masked-position logits", "provenance": provenance()})
+        "order": "AA20 = ACDEFGHIKLMNPQRSTVWY, raw masked-position logits", "provenance": provenance()}
+    if structures is not None:
+        record["structures_digest"] = c.structures_digest()
+    write_json(c.teacher_complete, record)
     print(f"teacher {c.spec.teacher}: {len(table)} contexts in {time.monotonic() - started:.0f}s", flush=True)
 
 

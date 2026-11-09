@@ -9,6 +9,7 @@ developer's shell cannot change a plan. `ScriptRun` executes a rendered sbatch s
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import os
 import stat
@@ -17,8 +18,9 @@ from pathlib import Path
 
 import pytest
 
+from mpd import registry
 from mpd.slurm.cluster import Cluster
-from mpd.slurm.plan import PlanOptions, make_plan
+from mpd.slurm.plan import PlanError, PlanOptions, make_plan
 from mpd.slurm.render import render_script
 from mpd.spec import RunSpec
 
@@ -75,6 +77,68 @@ def directives(text: str) -> list[str]:
 
 def replace_options(plan, **kw):
     return dataclasses.replace(plan, options=dataclasses.replace(plan.options, **kw))
+
+
+# ---------------------------------------------------------------- the render matrix
+MATRIX_STUDENTS = ("esm2-8m", "esm2-650m", "esm2-3b")
+MATRIX_BACKENDS = ("cache", "live")
+MATRIX_TEACHER = "esm2-3b"
+
+
+@contextlib.contextmanager
+def _without_mpd_environment():
+    """A plan reads MPD_* and SLURM_* variables of the shell (account, forwarded paths): hide them while one is built and
+    rendered, and put them back before anything is handed to the caller."""
+    saved = {k: os.environ.pop(k) for k in list(os.environ) if k.startswith(("MPD_", "SLURM_"))}
+    try:
+        yield
+    finally:
+        os.environ.update(saved)
+
+
+@contextlib.contextmanager
+def _teacher_with_cache(key: str):
+    """Every registered teacher runs live; `cache` is a backend the planner knows and no model offers yet. Offer it to one
+    teacher while a plan is built (the entry is put back before the plan is handed on)."""
+    saved = registry.MODELS[key]
+    registry.MODELS[key] = dataclasses.replace(saved, teacher_backends=("cache", "live"))
+    try:
+        yield
+    finally:
+        registry.MODELS[key] = saved
+
+
+def matrix_gpus(cluster_name: str) -> list[str]:
+    """The GPU types of a profile that can train: Turing cards (no native bfloat16) are refused by the planner."""
+    return [key for key, gpu in Cluster.load(cluster_name).gpus.items() if gpu.bf16]
+
+
+def render_matrix(home=None, *, clusters=("grace", "vision"), methods=METHODS, refused: list | None = None):
+    """Yield (label, plan, {stage full name: script text}) for every method x cluster x teacher backend x student x GPU, plus
+    `--train-gpus 2` on Grace for the *-all methods. The tests check the invariants of the scripts; the integrator runs
+    `sbatch --test-only` on the Vision ones.
+
+    Nothing is written and the environment is left as it was (a plan only computes with `home`, default a path that does
+    not exist). Combinations the planner refuses are skipped; give `refused` (a list) to receive (label, message) for them.
+    Needs no torch."""
+    home = Path(home) if home else HOME
+    for cluster in clusters:
+        for gpu in matrix_gpus(cluster):
+            for method in methods:
+                for backend in MATRIX_BACKENDS:
+                    for student in MATRIX_STUDENTS:
+                        for width in ([None, 2] if cluster == "grace" and method.endswith("all") else [None]):
+                            label = f"{cluster}/{gpu}/{method}/{backend}/{student}" + (f"/train-gpus-{width}" if width else "")
+                            try:
+                                with _without_mpd_environment(), _teacher_with_cache(MATRIX_TEACHER):
+                                    plan = make_plan(spec(teacher=MATRIX_TEACHER, student=student, method=method, teacher_backend=backend,
+                                                          train_gpus=width), opts(home, cluster, gpu=gpu))
+                                    scripts = render_all(plan)
+                            except PlanError as exc:
+                                if refused is not None:
+                                    refused.append((label, str(exc)))
+                                continue
+                            yield label, plan, scripts
 
 
 def _executable(path: Path, body: str) -> Path:
