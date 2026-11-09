@@ -75,7 +75,7 @@ contains this artefact; the 639 AlphaFold DB and experimental assays (0.2421, fr
 
 `mpd` masks correctly by default. How much the correction matters was measured on a subset only: on the 36 ESMFold assays of the
 CPU subset below, macro Spearman moves from 0.2510 (all residues masked, the recorded input) to 0.3722 (scale-aware masking), a mean
-change of +0.121 per assay with single assays moving by up to 0.9 (assays with 6 to 9 variants flip ranks easily). The effect on
+change of +0.121 per assay with single assays moving by up to 0.9 (assays with 6 to 9 variants change rank order readily). The effect on
 all 154 ESMFold assays, and so on the full 793-assay figure, is not measured: it needs about 1,960 forward passes of up to 955
 residues. Cells of earlier SaProt-on-Venus tables computed with the old inputs should be re-run or annotated.
 
@@ -320,10 +320,10 @@ structures on one core in the earlier analysis (not measured on Grace).
 
 | variable | meaning |
 |---|---|
-| `MPD_FOLDSEEK` | path of the Foldseek binary (overrides `<home>/tools`) |
+| `MPD_FOLDSEEK` | path of the Foldseek binary (overrides `<home>/tools`); copied into the job scripts as an absolute path, and a relative path in `--env MPD_FOLDSEEK=...` is a plan error |
 | `MPD_3DI_ENGINE` | `foldseek` (default) or `biotite` |
 | `MPD_MODEL_SAPROT_35M`, `MPD_MODEL_SAPROT_650M` | a local folder of weights instead of the fetched copy |
-| `MPD_STRUCTURE_LEGACY_MASK` | `1` reproduces the earlier study's ESMFold masking; for regression only |
+| `MPD_STRUCTURE_LEGACY_MASK` | `1` reproduces the earlier study's ESMFold masking; for regression only. It reaches a job only through `--env`, never from the shell (a shell that exports it gets a plan warning), and it starts a new campaign |
 
 ## What is and is not verified
 

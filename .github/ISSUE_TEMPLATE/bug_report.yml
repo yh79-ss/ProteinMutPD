@@ -37,6 +37,12 @@ body:
       label: Campaign id
       description: The folder name under `<home>/runs/` (the first line of `mpd plan` shows it). Leave empty if the problem happened before any campaign existed.
   - type: textarea
+    id: status
+    attributes:
+      label: Output of `mpd status CAMPAIGN`
+      description: For a campaign that was submitted. The table and the `problems:` and `next:` lines under it say which stage failed and what to try. Leave empty if nothing was submitted.
+      render: text
+  - type: textarea
     id: output
     attributes:
       label: What happened

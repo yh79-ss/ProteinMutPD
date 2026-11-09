@@ -409,12 +409,12 @@ def check_assays(spec, ctx) -> list[Check]:
 
 
 # ---------------------------------------------------------------- slurm tools and cost
-def check_slurm_tools(level: str) -> list[Check]:
+def check_slurm_tools(level: str, dry_run: bool = False) -> list[Check]:
     absent = [n for n in ("sbatch", "squeue", "sacct", "scancel") if not shutil.which(n)]
     if not absent:
         return [Check("slurm", "ok", "sbatch, squeue, sacct and scancel are on PATH")]
     if "sbatch" in absent:
-        if level == "submit":
+        if level == "submit" and not dry_run:
             return [Check("slurm", "error", "sbatch not found on PATH: submit from a Slurm login node "
                                             "(`mpd plan` and `mpd submit --dry-run` work anywhere)")]
         return [Check("slurm", "skip", "sbatch not found on PATH: this is not a Slurm login node "
@@ -502,8 +502,10 @@ def _foldseek_overview(ctx) -> list[Check]:
 
 
 def run_checks(spec, opts, plan=None, scripts=None, level: str = "plan", deep: bool = False, verify: bool = False,
-               max_su: float | None = None) -> list[Check]:
-    """All findings for a recipe (`level` plan | submit) or for the machine alone (`level` doctor, `spec` None)."""
+               max_su: float | None = None, dry_run: bool = False) -> list[Check]:
+    """All findings for a recipe (`level` plan | submit) or for the machine alone (`level` doctor, `spec` None).
+
+    `dry_run` (level submit): a machine without sbatch is not an error, because a dry run needs no Slurm client."""
     if level not in ("plan", "submit", "doctor"):
         raise ValueError(f"level must be plan, submit or doctor; got {level!r}")
     home = Path(opts.home)
@@ -527,7 +529,7 @@ def run_checks(spec, opts, plan=None, scripts=None, level: str = "plan", deep: b
         checks += _weights_overview(opts, verify)
         checks += _foldseek_overview(opts)
     if level != "plan":
-        checks += check_slurm_tools(level)
+        checks += check_slurm_tools(level, dry_run)
     if plan is not None and level == "submit":
         checks += _contributed("sbatch-test", "mpd.slurm.submit", "preflight_checks", plan, scripts)
     checks += check_cost(plan, max_su, level)

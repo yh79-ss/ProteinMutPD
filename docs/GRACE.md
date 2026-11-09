@@ -1,22 +1,24 @@
 # Running on TAMU HPRC Grace
 
 What a student with a Grace account needs to know before and while using `mpd`: accounts, quotas, the environment,
-what the jobs ask Slurm for, what it costs, and what has not been verified.
+what the jobs ask Slurm for, what it costs, what to do when a job does not finish, and what has not been verified.
 
 **Nothing in this repository has been run on Grace.** Every claim about Grace or about what `mpd` does carries one of these tags:
 
 | tag | meaning |
 |---|---|
-| **[CPU]** | tested on CPU in this repository (the planner, the script writer and the submit logic, against fake `sbatch`, `squeue`, `sacct`, `scancel`, `module` and `nvidia-smi` programs; tiny random models) |
+| **[CPU]** | tested on CPU in this repository (the planner, the script writer, the submit and recovery logic, against fake `sbatch`, `squeue`, `sacct`, `scancel`, `module` and `nvidia-smi` programs; tiny random models) |
 | **[Vision]** | accepted by `sbatch --test-only` on the Vision cluster (Slurm 25.05.6, nothing was queued) |
 | **[HPRC]** | taken from an HPRC document, named in the text (see [Sources](#sources)) |
 | **[earlier jobs]** | observed in Grace jobs that the profile's author ran in February-July 2026, before `mpd` existed; `mpd` has not been run |
 | **[NOT VERIFIED]** | nobody has run it; read it as a plan, not as a fact |
 
-Output pasted here is marked **simulated** when it came from a machine that is not Grace.
+Output pasted here is marked **simulated** when it came from a machine that is not Grace or from a fake Slurm; job ids, nodes and times in
+such output are invented.
 
 Contents: [Before you start](#before-you-start) | [Set up once](#set-up-once) | [Your first run](#your-first-run-cheap) |
-[What mpd asks Slurm for](#what-mpd-asks-slurm-for) | [What it costs](#what-it-costs) | [Why jobs are offline](#why-jobs-are-offline) |
+[When a job does not finish](#when-a-job-does-not-finish) | [What mpd asks Slurm for](#what-mpd-asks-slurm-for) |
+[What it costs](#what-it-costs) | [SaProt on Grace](#saprot-on-grace) | [Why jobs are offline](#why-jobs-are-offline) |
 [Other ways to build the environment](#other-ways-to-build-the-environment) | [What is not verified](#what-has-not-been-verified-on-grace)
 
 ## Before you start
@@ -74,6 +76,7 @@ setup script keeps pip's cache out of `$HOME`, and every job script points the H
 $MPD_HOME/
   env/          the Python venv and mpd_env.json (which modules the jobs load)
   cache/        pip wheels, tmp, build copy of the sources, job caches (xdg, torch, triton, mpl), Foldseek 3Di cache
+  hf_cache/     only for stray Hugging Face writes: the jobs are offline and read the folders under models/
   data/         proteingym-v1.3/  venusmuthub-v1/  (and venusmuthub-structures-v1/ for SaProt)
   models/       one plain folder per model key (esm2-650m/, esm2-3b/, ...)
   tools/        foldseek-10-941cd33/ (SaProt only)
@@ -96,18 +99,19 @@ mpd fetch model esm2-3b esm2-650m
 mpd doctor
 ```
 
-`mpd doctor` reports `[ok]`, `[warn]` (not blocking), `[FAIL]` (a real `mpd submit` will refuse) and `[skip]` (could not be checked), prints the
-command that fixes each problem, and exits with status 1 on any `[FAIL]`. What it prints before anything is set up (**simulated**: run on a
-machine that is not Grace, with an empty `$SCRATCH/mpd`, so `showquota` and Slurm are absent):
+`setup_env.sh` asks "Continue? [y/N]" before it builds; add `--yes` when you paste several lines at once. `mpd doctor` reports `[ok]`, `[warn]` (not
+blocking), `[FAIL]` (a real `mpd submit` will refuse) and `[skip]` (could not be checked), prints the command that fixes each problem, and exits
+with status 1 on any `[FAIL]`. What it prints before anything is set up (**simulated**: run on a machine that is not Grace, with an empty
+`$SCRATCH/mpd`, so `showquota` and Slurm are absent):
 
 ```text
-[ok]   home              /scratch/user/<netid>/mpd (exists; writable; 149 GB free on this filesystem)
+[ok]   home              /scratch/user/<netid>/mpd (exists; writable; 154 GB free on this filesystem)
 [skip] quota             showquota not found (it exists on HPRC clusters); check your quota yourself
 [ok]   account           not set: jobs are charged to your default Slurm account (`myproject` lists accounts; set --account or MPD_ACCOUNT)
 [FAIL] python            no Python environment at /scratch/user/<netid>/mpd/env. Run: bash scripts/setup_env.sh --cluster grace
 [warn] data:proteingym   ProteinGym data not found under /scratch/user/<netid>/mpd/data/proteingym-v1.3. Run on a login node: mpd fetch proteingym --cluster grace
 [warn] data:venusmuthub  VenusMutHub data not found under /scratch/user/<netid>/mpd/data/venusmuthub-v1. Run on a login node: mpd fetch venusmuthub --cluster grace
-[warn] weights           none fetched yet. not fetched: esm2-8m, esm2-35m, esm2-150m, esm2-650m, esm2-3b (a plan needs only its teacher and student; `mpd models` has sizes)
+[warn] weights           none fetched yet. not fetched: esm2-8m, esm2-35m, esm2-150m, esm2-650m, esm2-3b, saprot-35m, saprot-650m (a plan needs only its teacher and student; `mpd models` has sizes)
                          fix: mpd fetch model esm2-650m --cluster grace
 [ok]   foldseek          not installed (only SaProt needs it): mpd fetch foldseek --cluster grace
 [skip] slurm             sbatch not found on PATH: this is not a Slurm login node (plan and --dry-run work anywhere; submit needs it)
@@ -138,8 +142,8 @@ torch):
    same modules, so there is no profile to edit **[CPU]**;
 6. adds `MPD_HOME` and `MPD_CLUSTER` to `env/bin/activate` (so `source .../activate` is all a new shell needs), and runs `mpd doctor`.
 
-pip's cache and `TMPDIR` are under `$MPD_HOME/cache`; nothing is written under `$HOME`. The wheels are about 3 GB to download (an
-estimate from a pip dry run for a newer torch; not measured for the pinned set) and the result is about 28,000 files and 7.7 GB
+pip's cache and `TMPDIR` are under `$MPD_HOME/cache`; nothing is written under `$HOME`. The wheels are 3 to 4 GB to download (a pip dry run
+for a newer torch counted 3 GB; resolving the pinned set for the CI checks put about 4 GB of wheels into a pip cache; neither was timed on Grace) and the result is about 28,000 files and 7.7 GB
 (measured on the reference environment with the same package versions). If the login node ends the script after its hour, run it
 again: the wheels are cached and it continues.
 
@@ -148,7 +152,8 @@ Other options: `--home DIR` (then `source DIR/env/bin/activate`), `--python PATH
 
 **After `git pull`**, run the script again. A normal install is a snapshot taken from a copy of the sources, so pulling never changes
 the code under a running campaign; `mpd doctor` warns when the installed `mpd` or `constraints/grace.txt` differs from what the
-environment was built with **[CPU]**.
+environment was built with **[CPU]**. A campaign directory is also fixed once it has been submitted: if a newer `mpd` would plan a different
+recipe for the same campaign id, it refuses to mix the two ([below](#a-different-recipe-is-refused)).
 
 Whether a venv built from a module's Python runs on a compute node with only the recorded modules loaded is **[NOT VERIFIED]**. The
 only recipe with a record on Grace is a conda environment called by its absolute interpreter path **[earlier jobs]**; see
@@ -160,10 +165,11 @@ Compute nodes have no internet (below), so these run on a login node:
 
 | command | download | on disk |
 |---|---|---|
-| `mpd fetch proteingym` | 62.4 MB (Zenodo record 15293562, checksum-verified) | 1.2 GB, 421 files |
+| `mpd fetch proteingym` | 62.4 MB (Zenodo record 15293562, checksum-verified; includes the AF2 structures SaProt reads) | 1.2 GB, 421 files |
 | `mpd fetch venusmuthub` | 796 small files, fetched one at a time (Hugging Face rate-limits bursts) | 6.3 MB, 797 files |
 | `mpd fetch model esm2-3b esm2-650m` | 13.98 GB (11.37 GB + 2.61 GB), resumable | the same, 12 files |
 | `mpd fetch model --list` | what is pinned, its size, and what you already have | |
+| `mpd fetch foldseek` (SaProt only) | 11.9 MB, from github.com | 29.4 MB |
 
 Sizes are from the pinned manifests and from a real fetch of the data **[CPU]**; the download of the large model files from a Grace
 login node has not been timed **[NOT VERIFIED]**. If a login node cannot reach the Hugging Face Hub, or you are rate-limited
@@ -181,10 +187,20 @@ mpd submit --account <ACCOUNT> --teacher esm2-8m --student esm2-8m --train-data 
 mpd submit --account <ACCOUNT> --teacher esm2-8m --student esm2-8m --train-data proteingym --method score-all --eval-data proteingym --updates 50 --train-gpus 1 --score-shards proteingym=1
 ```
 
-The plan (**simulated**: the Grace profile on a machine that is not Grace, with a made-up account; the numbers are the planner's
-estimates, not measurements):
+The plan (**simulated**: the Grace profile on a machine that is not Grace, with a made-up account, ProteinGym fetched and nothing else; the
+numbers are the planner's estimates, not measurements; the five `warning:` lines that follow the notes, each saying that a walltime or the GPU
+memory is an estimate, are left out here):
 
 ```text
+campaign   esm2-8m__esm2-8m__proteingym-score-all__seed20260922__cbeda1e7__6bebd418
+directory  /scratch/user/<netid>/mpd/runs/esm2-8m__esm2-8m__proteingym-score-all__seed20260922__cbeda1e7__6bebd418
+cluster    grace  gpu=a100  home=/scratch/user/<netid>/mpd
+python     /scratch/user/<netid>/mpd/env/bin/python
+teacher    esm2-8m (live)   student esm2-8m
+train      proteingym  method=score-all  units=1
+eval       proteingym
+recipe     50 updates, global batch 64 (= 1 GPU x 2 micro x 32 accum), lr 3e-05, kl 0.0, support observed
+
 stage          tasks  gpu       cpus   mem  walltime          SU (max)  after
 prepare            1  -            8   32G  04:00:00                32  -
 teacher            1  1xa100      24  180G  00:15:00 est            24  prepare
@@ -193,12 +209,39 @@ score-base         1  1xa100      24  180G  00:15:00 est            24  prepare
 score              1  1xa100      24  180G  00:15:00 est            24  train
 evaluate           1  -            4   16G  01:00:00                 4  score-base, score
 
+walltime: est = estimate, not measured; meas = scaled from timed runs; set = given by you
 estimated upper bound: 133 SU (every task runs to its requested walltime and the node share it asks for; the charge follows actual runtime). Estimate, not measured.
+SU rule: (effective cores + GPU rate x GPUs) x hours; memory counts as cores. Grace's sbatch prints a "Requested SUs" line that counts CPUs only, so it is lower than the total above; `myproject` shows your balance.
+campaign id: a new --eval-data, --gpu, --train-gpus or --score-shards (or MPD_DTYPE, MPD_TF32, --env MPD_STRUCTURE_LEGACY_MASK=1) is a new campaign and trains again from the start.
+  Walltimes, --array-throttle, --sbatch-arg, --module, other --env pairs and --account keep the id: `mpd submit --force` applies them to the stages it queues again.
+
+[ok]   home             /scratch/user/<netid>/mpd (exists; writable; 154 GB free on this filesystem)
+[skip] quota            showquota not found (it exists on HPRC clusters); check your quota yourself
+[ok]   account          123456789012 (not checked against `myproject`: command not found)
+[FAIL] python           no Python environment at /scratch/user/<netid>/mpd/env. Run: bash scripts/setup_env.sh --cluster grace
+[ok]   data:proteingym  /scratch/user/<netid>/mpd/data/proteingym-v1.3 (complete: FETCHED.json present)
+[FAIL] weights esm2-8m  weights for esm2-8m are missing (/scratch/user/<netid>/mpd/models/esm2-8m)
+                        fix: mpd fetch model esm2-8m --cluster grace
+[ok]   cost             estimated upper bound 133 SU (an estimate, not measured)
+
+NOT READY: 2 errors, 0 warnings. Plan and --dry-run only report these (exit 0); `mpd submit` stops at the first error.
 ```
 
 133 SU is 0.7% of a 20,000 SU allocation. It is an upper bound: 15 minutes is the floor of the walltime formula (a 10-minute start-up
-allowance plus rounding), not a prediction, and the real charge follows the run time. `--dry-run` writes and checks the scripts
-(including `sbatch --test-only` on each distinct shape) and queues nothing.
+allowance plus rounding), not a prediction, and the real charge follows the run time. `prepare` is a CPU job that asks for 04:00:00, 8 CPUs and
+32 GB whatever the recipe, which accounts for 32 of the 133 SU; on the real ProteinGym and VenusMutHub files its work (tables and, for a SaProt run, Foldseek) took 20 to 23
+seconds on a loaded login node of another cluster **[CPU]** (not on Grace, not through Slurm).
+
+`--dry-run` writes the scripts under `<campaign>/scripts/` and runs the checks above, which on a Slurm login node include
+`sbatch --test-only` once for each distinct job shape (read-only: it asks Slurm whether it would accept the request and queues nothing). Without
+`sbatch` on the `PATH` the dry run reports (**simulated**, a machine that is not Grace; neither line counts as an error):
+
+```text
+[skip] slurm               sbatch not found on PATH: this is not a Slurm login node (plan and --dry-run work anywhere; submit needs it)
+[skip] sbatch --test-only  sbatch is not on PATH (not a Slurm login node): the generated scripts were not test-submitted
+```
+
+`mpd submit` without `--dry-run` stops on such a machine with `[FAIL] slurm` and `sbatch not found on PATH: submit from a Slurm login node`.
 
 What to look at afterwards:
 
@@ -210,11 +253,288 @@ What to look at afterwards:
 - No `mpd` job has ever run on a GPU. The first `import torch` took 88 to 127 s, and once more than 3 minutes, in the author's earlier Grace
   jobs **[earlier jobs]**; the 10-minute start-up allowance is meant to cover that **[NOT VERIFIED]**.
 
+## When a job does not finish
+
+The rule is one sentence: **run the `mpd submit` command you used the first time, change only the option the problem calls for, and add
+`--force`.** `--force` means "continue or repair". Stages that are queued, running or finished are kept; the stages that died, and everything
+that waited for them, are queued again, with the walltimes and sbatch options of the command you typed last. Training continues from its last
+save (every `MPD_CKPT_EVERY` updates, 200 unless you changed it). `--force` never queues a second copy of a chain that is still alive; for an
+independent run change `--seed`. Everything in this section was run against a fake Slurm **[CPU]**; none of it has been seen on Grace.
+
+### What starts a new campaign and what does not
+
+A campaign is a folder `<home>/runs/<campaign id>/` with its stages, checkpoints and results. The id ends in eight hex digits that depend on:
+
+| Changes the id (a new campaign: new folder, everything is computed again) | Keeps the id (the same campaign; `--force` applies it to the stages it queues again) |
+|---|---|
+| the recipe: teacher, student, data, method, assays, `--seed`, `--updates`, `--global-batch`, `--lr`, `--kl-weight`, `--dev-fraction` | `--train-time`, `--score-time`, `--teacher-time` |
+| `--eval-data` | `--array-throttle` |
+| `--cluster`, `--gpu`, `--train-gpus` | `--sbatch-arg` (for example `--sbatch-arg=--exclude=g007`), `--module` |
+| `--score-shards` | `--env` pairs other than the three on the left |
+| `MPD_DTYPE`, `MPD_TF32` (from the shell or `--env`), `--env MPD_STRUCTURE_LEGACY_MASK=1` | `--account`, `--python` |
+
+`--home` is not part of the id, but a different home is a different folder: nothing is shared between two homes. `mpd plan` and `mpd submit`
+print this rule under the stage table (the two `campaign id:` lines above). The reason for the split: after a TIMEOUT the natural fix is a longer
+`--train-time`, and after a bad node it is `--sbatch-arg=--exclude=NODE`; both must find the finished stages and the training checkpoints again.
+A stage that is still queued or running keeps the script it was submitted with, because Slurm cannot change a queued job; `mpd submit --force`
+says so. To change a job that is still waiting, `mpd cancel <campaign>` and submit again.
+
+### Recipes
+
+The commands of the recipes below, in one place. `$TEACHER`, `$STUDENT` and `$RECIPE` are the three lines of the [README](../README.md#quick-start-on-grace); the first line is the
+command you ran the first time.
+
+```bash
+TEACHER=esm2-3b STUDENT=esm2-650m
+RECIPE="--train-data proteingym --method score-all --eval-data proteingym venusmuthub"
+
+mpd submit --teacher $TEACHER --student $STUDENT $RECIPE
+mpd submit --teacher $TEACHER --student $STUDENT $RECIPE --train-time 16:00:00 --force                # a TIMEOUT
+mpd submit --teacher $TEACHER --student $STUDENT $RECIPE --sbatch-arg=--exclude=g007 --force         # a node without a working GPU
+mpd submit --teacher $TEACHER --student $STUDENT $RECIPE --force                                      # an interrupted submission, a NODE_FAIL, a failed stage
+mpd cancel <campaign>
+mpd submit --teacher $TEACHER --student $STUDENT $RECIPE                                              # after the cancel: no --force
+mpd submit --teacher $TEACHER --student $STUDENT $RECIPE --seed 2                                     # an independent run
+```
+
+Each recipe starts from what `mpd status <campaign>` prints under `problems:`.
+
+| What `mpd status` shows | Do this |
+|---|---|
+| `train ... TIMEOUT`, "reached its time limit" | the original command with a larger `--train-time` (it suggests twice the old limit, never above what the partition allows) and `--force`. Training continues from its last save. If it already asked for the partition maximum, run the same command with `--force` again: every attempt continues from the last save. A `score` or `teacher` timeout names `--score-time` or `--teacher-time`; the teacher starts from the beginning because it saves its table only at the end. `prepare` and `evaluate` have no time option. |
+| `FAILED`, exit code 31, `MPD_NO_GPU` in the log | the node has no usable GPU. The original command plus `--sbatch-arg=--exclude=<node>` (the node is named in the message) and `--force`. |
+| `OUT_OF_MEMORY`, or `FAILED` with exit 137, or `CUDA out of memory` in the log | the log decides: a CUDA message means the GPU is too small for this model at this size, so use a smaller student or a larger GPU (`--gpu`; that is a new campaign). More GPUs do not help: training is data-parallel and every GPU holds a full copy of the model. Without a CUDA message the node ran out of host memory: add `--sbatch-arg=--mem=<more>G` and `--force`. mpd's memory figures are estimates, not measurements. |
+| `NODE_FAIL` | the node failed, not your settings: the original command with `--force`; if it lands on the same node, add `--sbatch-arg=--exclude=<node>`. |
+| `FAILED`, `MPD_MODULE_LOAD_FAILED` in the log | a module of the environment record could not be loaded. `mpd doctor` (row `env-record`), then `bash scripts/setup_env.sh --cluster grace` writes the record again; then the original command with `--force`. |
+| `FAILED`, `weights for ... are missing`, or `huggingface.co` / offline mode in the log | the weights are not on disk and compute nodes are offline. On a login node run the `mpd fetch model ...` command the message prints; then the original command with `--force`. |
+| `CANCELLED` with reason `DependencyNeverSatisfied` | a stage before it failed. Fix that one first; then the original command with `--force`. |
+| `submit` ended with `Slurm did not answer ...`, state `partial` | the controller went away while the chain was being queued. When `squeue -u "$USER"` answers again, run the same command with `--force`: jobs that were queued (even one that sbatch accepted while reporting an error) are found by their tag and kept, the rest are queued. No duplicates. |
+| you ran `mpd cancel`, or the last submission ended `failed` | the same command, with any option you want to change; no `--force` needed. Stages whose output files exist are not queued again. |
+| a stage ran, but you want it to run again | delete its marker file and repeat the command with `--force` ([below](#running-a-finished-stage-again)). |
+
+All the words `mpd status` uses, state by state and reason by reason, are in [TROUBLESHOOTING.md](TROUBLESHOOTING.md#what-mpd-status-says).
+
+### A TIMEOUT
+
+Simulated (the real CLI against a fake Slurm; job ids, nodes and times invented; nothing ran on Grace). `train` asked for 8 hours and
+hit the limit; what waited for it was cancelled by Slurm. Without `--force` the same command is refused and nothing is written; with it, only
+the missing stages are queued, and `train` and the stages behind it carry the new time. In the `mpd submit` transcripts of this section the plan, the checks
+and the line `scripts written to <campaign>/scripts`, which come before the queueing lines, are left out:
+
+```text
+$ mpd status <campaign>
+campaign   esm2-3b__esm2-650m__proteingym-score-all__seed20260922__054935cb
+directory  /scratch/user/<netid>/mpd/runs/esm2-3b__esm2-650m__proteingym-score-all__seed20260922__054935cb
+state      submitted   (submitted 2026-11-09T07:09:27-0600)
+
+stage       state      elapsed   reason                    job   exit  tasks  note
+prepare     COMPLETED  00:03:11  -                         1001  0:0   1/1
+teacher     COMPLETED  00:40:12  -                         1002  0:0   1/1
+train       TIMEOUT    08:00:12  -                         1003  0:15  0/1
+score-base  COMPLETED  00:25:00  -                         1004  0:0   4/4    4 COMPLETED
+score       CANCELLED  00:30:00  DependencyNeverSatisfied  1005  0:0   0/4    4 CANCELLED
+evaluate    CANCELLED  00:30:00  DependencyNeverSatisfied  1006  0:0   0/1
+
+problems:
+  train (job 1003) reached its time limit: it ran 08:00:12 of the 08:00:00 it asked for.
+    Training saves its progress every MPD_CKPT_EVERY updates (200 unless you changed it) and continues from the latest
+      save, so the work done so far is kept.
+    Run your original `mpd submit ...` command again with a larger --train-time (for example --train-time 16:00:00; this
+      partition allows up to 4-00:00:00) and --force.
+  last lines of the error log of train (job 1003):
+    step 1500 loss 0.31
+    slurmstepd: error: *** JOB 1003 ON g003 CANCELLED AT 2026-11-09T12:05:00 DUE TO TIME LIMIT ***
+  score (job 1005) was cancelled because a stage it waited for did not finish.
+  evaluate (job 1006) was cancelled because a stage it waited for did not finish.
+
+next:
+  mpd logs esm2-3b__esm2-650m__proteingym-score-all__seed20260922__054935cb train --err    the whole error log
+  docs/TROUBLESHOOTING.md explains the usual failures
+  repeat your mpd submit command with --force to continue: stages that are queued, running or finished are kept, the others are queued again, with any --train-time, --sbatch-arg or similar option you changed
+
+$ mpd submit <original options> --train-time 16:00:00 --force
+finished  prepare      (its output files exist)
+finished  teacher      (its output files exist)
+submitted train        job 1007
+finished  score-base   (its output files exist)
+submitted score        job 1008
+submitted evaluate     job 1009
+
+submitted 3 job(s) for esm2-3b__esm2-650m__proteingym-score-all__seed20260922__054935cb
+  follow it  mpd status esm2-3b__esm2-650m__proteingym-score-all__seed20260922__054935cb
+  read logs  mpd logs esm2-3b__esm2-650m__proteingym-score-all__seed20260922__054935cb [STAGE] [--err]
+  cancel     mpd cancel esm2-3b__esm2-650m__proteingym-score-all__seed20260922__054935cb
+  results    mpd results esm2-3b__esm2-650m__proteingym-score-all__seed20260922__054935cb   (after the evaluate stage)
+```
+
+The refusal without `--force` (exit status 2) reads:
+
+```text
+error: campaign esm2-3b__esm2-650m__proteingym-score-all__seed20260922__054935cb was already submitted (jobs: prepare 1001, teacher 1002, train 1003, score-base 1004, score 1005, evaluate 1006). Nothing was written.
+  mpd status esm2-3b__esm2-650m__proteingym-score-all__seed20260922__054935cb    follow it
+  mpd cancel esm2-3b__esm2-650m__proteingym-score-all__seed20260922__054935cb    stop its queued and running jobs; after that the same command submits it again (finished stages are kept)
+  add --force to this command to continue or repair it: stages that are queued, running or finished are kept and the others are queued
+      A changed --train-time, --score-time, --teacher-time, --array-throttle, --sbatch-arg, --module
+      or --env (except MPD_DTYPE, MPD_TF32 and MPD_STRUCTURE_LEGACY_MASK) keeps the campaign (its id
+      does not depend on them), and --force applies it to the stages it queues again; a stage that
+      is still queued or running keeps the options it was submitted with. A changed --gpu,
+      --train-gpus, --eval-data or --score-shards is a different campaign that trains again from the
+      start.
+  or change --seed for an independent run
+```
+
+### A bad node
+
+In May 2026 one Grace node listed its A100 in `nvidia-smi` while `torch.cuda.is_available()` was false **[earlier jobs]**. A GPU stage now stops with
+exit status 31 and `MPD_NO_GPU: ...` instead of running on the CPU **[CPU]**. `mpd status` names the node and the exact option (simulated):
+
+```text
+problems:
+  train (job 1003) failed with exit code 31.
+    The node has no usable GPU (the job stopped instead of running on the CPU). Run your original `mpd submit ...`
+      command again with --sbatch-arg=--exclude=g007 and --force.
+  last lines of the error log of train (job 1003):
+    MPD_NO_GPU: no usable GPU on g007; resubmit with --sbatch-arg=--exclude=g007
+
+$ mpd submit <original options> --sbatch-arg=--exclude=g007 --force
+finished  prepare      (its output files exist)
+finished  teacher      (its output files exist)
+submitted train        job 1007
+kept      score-base   job 1004 (already queued or running)
+submitted score        job 1008
+submitted evaluate     job 1009
+
+submitted 3 job(s) for esm2-3b__esm2-650m__proteingym-score-all__seed20260922__054935cb
+note: kept stages (score-base) stay queued or running with the options they were submitted with; a changed walltime, --sbatch-arg or --module applies to the stages queued now. To change a job that is still waiting, `mpd cancel` the campaign and submit it again
+```
+
+The `kept` stage is still running and is not touched. `--sbatch-arg` takes an equals sign (`--sbatch-arg=--exclude=g007`) because the value starts with
+`--`. Extra sbatch options keep the campaign, so the finished `prepare` and `teacher` are not computed again **[CPU]**.
+
+### A submission that was interrupted
+
+Grace's controller went away for minutes to hours on 2026-06-11, 06-26, 07-24 and 07-26, and on 07-26 `sbatch` printed
+`Unable to contact slurm controller` although it had accepted the whole chain **[earlier jobs]**. So a failed `sbatch` is not proof that nothing was
+queued. `mpd submit` gives every job a tag in its `--comment`, writes `SUBMITTED.json` after each accepted job, waits and looks in `squeue -u "$USER"`
+for a job with this submission's tag before it tries again (up to 6 tries and about 15 minutes), and cancels what it queued if it gives up. Simulated:
+the controller stops answering after the second job and `squeue` and `scancel` are down too.
+
+```text
+$ mpd submit <options>
+submitted prepare      job 1001
+submitted teacher      job 1002
+Slurm did not answer for stage train (Unable to contact slurm controller (connect failure)); waiting 60 s, then checking the queue before trying again (try 1 of 6)
+...
+Slurm did not answer for stage train (Unable to contact slurm controller (connect failure)); waiting 172 s, then checking the queue before trying again (try 6 of 6)
+error: sbatch could not queue stage train: Slurm did not answer after 7 attempt(s) over 900 s (last message: Unable to contact slurm controller (connect failure)). The job may have been accepted anyway; the queue could not be read to check.
+Could not cancel the jobs already queued (Unable to contact slurm controller (connect failure)). Run `scancel 1001 1002` when Slurm answers, or `mpd cancel <campaign>`; their ids are saved in <campaign>/SUBMITTED.json.
+Stage train may have been accepted although sbatch reported an error (the queue could not be read to check). `mpd cancel <campaign>` finds and cancels it by its tag once Slurm answers.
+Run the same command with --force to continue from the first missing stage, or `mpd cancel <campaign>`.
+
+$ mpd submit <options> --force          (after the outage; a job that sbatch had accepted while reporting an error is found by its tag)
+kept      prepare      job 1001 (already queued or running)
+kept      teacher      job 1002 (already queued or running)
+kept      train        job 1003 (already queued or running)
+submitted score-base   job 1004
+submitted score        job 1005
+submitted evaluate     job 1006
+```
+
+Run `mpd status <campaign>` before anything else: the message says whether a stage may have been accepted anyway. Do not delete `SUBMITTED.json`. If
+`mpd status` itself prints `slurm      no job states: ...`, the controller is not answering yet; wait and ask again.
+
+### After `mpd cancel`, or a submission that ended `failed`
+
+`mpd cancel <campaign>` removes the queued and running jobs and marks the campaign `cancelled`. A submission that Slurm refused ends `failed` (what that
+run had queued is cancelled). In both cases the same `mpd submit` command, with or without `--force`, queues **only the stages whose output files are
+missing**; a stage whose output files exist is printed as `finished  <stage>  (its output files exist)` and not queued, and a job that is still alive is
+kept, never duplicated. Simulated: `prepare` and `teacher` had finished, the student cancelled the rest, then repeated the command with a different `--train-time`:
+
+```text
+$ mpd cancel <campaign>
+cancelled 4 job(s) of esm2-3b__esm2-650m__proteingym-score-all__seed20260922__054935cb: 1003 1004 1005 1006
+
+$ mpd submit <options> --train-time 12:00:00
+...                      (the plan and the checks, as for the first submit)
+
+scripts written to <home>/runs/esm2-3b__esm2-650m__proteingym-score-all__seed20260922__054935cb/scripts
+the earlier submission of this campaign cancelled (cancelled 4 job(s) with mpd cancel at 2026-11-09T07:09:33-0600); submitting it again
+finished  prepare      (its output files exist)
+finished  teacher      (its output files exist)
+submitted train        job 1007
+submitted score-base   job 1008
+submitted score        job 1009
+submitted evaluate     job 1010
+```
+
+#### A different recipe is refused
+
+A campaign directory's recipe files (`spec.json`, `resolved.json`, `tasks/*.json`) are fixed once it has a `SUBMITTED.json`, in any state. If a command would
+write a different recipe into it (the usual cause is a newer `mpd` with other presets or registry), the command is refused and the message names the file and
+the keys that differ (simulated: `resolved.json` was edited by hand to stand for another version):
+
+```text
+error: <home>/runs/<campaign> holds a campaign that ended as cancelled and has a different recipe (resolved.json), so it cannot be submitted again; its finished stages would be mixed with the new recipe:
+  resolved.json: microbatch: 1 on disk, 2 now
+A submitted campaign is never rewritten. Its recipe follows from the options in its id (--eval-data, --gpu, --train-gpus, --score-shards, the recipe flags and --seed) and from the mpd version, presets and model registry that wrote it, so the usual cause is another mpd version or an edited file. Run the command with the mpd version that created the campaign, or change --seed to start a new campaign, or remove the directory (`mpd cancel` its jobs first).
+```
+
+### Running a finished stage again
+
+A stage counts as finished when its output files exist. To run one again, delete its marker file and repeat the command with `--force`. The stage is queued again, with every
+unfinished stage that waits on it (a queued job that waited for the old one is cancelled and queued again); stages that are finished or still alive are kept. The
+stage messages say the same (`grep -rn "COMPLETE.json" src/mpd/stages`).
+
+| stage | marker to delete |
+|---|---|
+| `prepare` | `contexts/MANIFEST.json` |
+| `teacher` | `teacher/COMPLETE.json` |
+| `train` | `train/<unit>/COMPLETE.json` |
+| `score-base`, `score` | the `score/<dataset>/<unit>/shard_*.json` files |
+| `evaluate` | `evaluate/summary.json` |
+
+A stage whose own output exists is never queued, even when an earlier stage runs again: delete the markers of every stage you want to run again. The tests delete
+the markers of `prepare` and `teacher`; the other rows follow the same rule in the code but were not exercised. Simulated, with everything finished and
+`teacher/COMPLETE.json` deleted:
+
+```text
+$ mpd submit <original options> --force
+finished  prepare      (its output files exist)
+submitted teacher      job 1007
+finished  train        (its output files exist)
+finished  score-base   (its output files exist)
+finished  score        (its output files exist)
+finished  evaluate     (its output files exist)
+
+submitted 1 job(s) for esm2-3b__esm2-650m__proteingym-score-all__seed20260922__054935cb
+```
+
+### Reading the table of `mpd status`
+
+One line per stage. The first four fields are single words and stay in this order:
+
+```text
+stage  state  elapsed  reason  job  exit  tasks  note
+```
+
+`state` is Slurm's (`sacct`), `elapsed` its run time, `reason` the reason `squeue` still has for the job (`Priority`, `Dependency`, `TimeLimit`, ...; `-` when there is none), `job` the
+Slurm id, `exit` the exit status and signal, `tasks` how many tasks of the stage wrote their output files, `note` the per-state counts of an array. Sections after the table:
+`problems:` (a stage that failed, timed out or was cancelled, in plain words with the exact command), `waiting:` (one line for each stage that has not started), `next:`. A line
+`earlier ...` lists the job ids that `--force` replaced; their logs stay in `<campaign>/logs/`. If `sacct` and `squeue` are missing or silent the state column is `-` and there
+is no advice: `mpd` says so instead of guessing.
+
+### Not verified
+
+All of this was built and tested against a fake Slurm on CPU **[CPU]**. Not verified on Grace: the wording of `sacct` and `squeue` there (the `Timelimit` and `NodeList` columns; if `sacct` refuses them
+`mpd` asks again without them), the `ExitCode` of a job that hit its limit or was killed, whether `squeue -t all` still lists a finished job (`MinJobAge`) and what reason it keeps; that Grace
+honours `--kill-on-invalid-dep=yes` and keeps the `--comment` tag `mpd` uses to recognise its jobs; that a training run that hit its limit really continues from its save on a GPU node; the partition
+maximum printed in the TIMEOUT advice is the figure in the cluster profile, taken from HPRC documents, not read from the cluster.
+
 ## What mpd asks Slurm for
 
 | stage | GPUs | cores / memory | default walltime |
 |---|---|---|---|
-| `prepare` | none | 8 / 32 GB | 4 h, fixed |
+| `prepare` | none | 8 / 32 GB | 4 h, fixed (an upper bound: see above) |
 | `teacher` | 1 | 24 / 180 GB | from the token count of the training table (estimate) |
 | `train` | 1 (`--train-gpus 2` for DDP) | 24 / 180 GB for one A100, 48 / 360 GB for two | from the updates, the model size and the GPU (estimate) |
 | `score-base`, `score` | 1 | 24 / 180 GB | from the tokens of the largest task (estimate) |
@@ -275,10 +595,7 @@ T4 node in the author's jobs **[earlier jobs]** and Vision rejects a type with t
   hardware slide, three in a `maxconfig` capture in the same deck); `mpd` assumes two, which only limits `--train-gpus`
   **[NOT VERIFIED]**. Choosing `--gpu a40` for a recipe you already planned with the A100 makes a new campaign, because the GPU is part of
   the campaign id **[CPU]**.
-- **A bad node.** In May 2026 a node (g006) listed its A100 in `nvidia-smi` while `torch.cuda.is_available()` was false
-  **[earlier jobs]**. A GPU stage now stops with exit status 31 and `MPD_NO_GPU: ...` instead of running on the CPU **[CPU]**. Run the same `mpd submit`
-  command again with `--force`; if the same node fails again, add `--sbatch-arg=--exclude=<node>` with the node name from the log. Extra sbatch
-  options are part of the campaign id, so that starts a new campaign ([TROUBLESHOOTING.md](TROUBLESHOOTING.md#a-job-failed-or-stopped)).
+- **A bad node** is a recovery recipe: [above](#a-bad-node).
 
 ### Walltimes and GPU memory are estimates
 
@@ -320,8 +637,8 @@ in any test **[NOT VERIFIED]**, while the same renderer's Vision scripts were ac
 #SBATCH --gres=gpu:a100:2
 #SBATCH --partition=gpu
 #SBATCH --account=123456789012
-#SBATCH --output=/scratch/user/<netid>/mpd/runs/<campaign>/logs/%x_%j.out
-#SBATCH --error=/scratch/user/<netid>/mpd/runs/<campaign>/logs/%x_%j.err
+#SBATCH --output=<campaign>/logs/%x_%j.out
+#SBATCH --error=<campaign>/logs/%x_%j.err
 #SBATCH --open-mode=append
 
 set -eo pipefail
@@ -329,22 +646,26 @@ type module >/dev/null 2>&1 || source /etc/profile 2>/dev/null || true
 type module >/dev/null 2>&1 || { echo "MPD_MODULE_LOAD_FAILED the module command is not available (Anaconda3/2024.02-1)" >&2; exit 1; }
 module purge
 module load Anaconda3/2024.02-1 || { echo "MPD_MODULE_LOAD_FAILED Anaconda3/2024.02-1" >&2; exit 1; }
-unset PYTHONPATH PYTHONHOME
+for _v in $(compgen -e); do case $_v in MPD_*) unset "$_v";; esac; done; unset _v PYTHONPATH PYTHONHOME
 set -u
-export MPD_HOME=... HF_HOME=... XDG_CACHE_HOME=... TORCH_HOME=... TRITON_CACHE_DIR=... MPLCONFIGDIR=...
+export MPD_HOME=... MPD_CLUSTER=grace HF_HOME=... XDG_CACHE_HOME=... TORCH_HOME=... TRITON_CACHE_DIR=... MPLCONFIGDIR=...
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 TOKENIZERS_PARALLELISM=false PYTHONUNBUFFERED=1 PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1 OMP_NUM_THREADS=24
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True MPD_REQUIRE_CUDA=1
 nvidia-smi -L || { echo "MPD_NO_GPU: no usable GPU on $(hostname -s); resubmit with --sbatch-arg=--exclude=$(hostname -s)" >&2; exit 31; }
 echo "MPD_JOB_START host=$(hostname) job=${SLURM_JOB_ID:-} stage=train"
-cd /scratch/user/<netid>/mpd/runs/<campaign>
+cd <campaign>
 
-<python> -m torch.distributed.run --standalone --nnodes=1 --nproc_per_node=2 -m mpd.stages.train --campaign-dir /scratch/user/<netid>/mpd/runs/<campaign> --stage train --task-index 0
+<python> -m torch.distributed.run --standalone --nnodes=1 --nproc_per_node=2 -m mpd.stages.train --campaign-dir <campaign> --stage train --task-index 0
 echo "MPD_STAGE_DONE train"
 ```
 
-- **The environment is cleaned, not inherited.** A job starts with the environment of the shell that ran `sbatch`, so the script runs `module
-  purge` (when `module` exists), loads only the recorded modules, and unsets `PYTHONPATH` and `PYTHONHOME`. With no module recorded the
-  three module lines become `if type module >/dev/null 2>&1; then module purge; fi`.
+- **Part of the environment is cleaned, the rest is inherited.** A job starts with the environment of the shell that ran `sbatch` (Slurm's
+  default). The script runs `module purge` (when `module` exists), loads only the recorded modules, and drops `PYTHONPATH`, `PYTHONHOME`
+  and every `MPD_*` variable of your shell, then exports the ones the plan chose (`MPD_ALLOW_HUB` or `MPD_STRUCTURE_LEGACY_MASK` in your
+  shell therefore never reach a job; the second only through `--env`). `PATH`, `LD_LIBRARY_PATH`, `VIRTUAL_ENV`, `CONDA_*` and whatever
+  else you exported do arrive: the Grace job scripts that ran did the same **[earlier jobs]**. If a job fails to import `torch` with a
+  library error and your shell has an old `LD_LIBRARY_PATH`, `unset` it before `mpd submit`. With no module recorded the three module
+  lines become `if type module >/dev/null 2>&1; then module purge; fi`.
 - **There is no `--export` and no `--get-user-env`.** Slurm 25.05 rejects `--get-user-env=L` ("doesn't allow an argument") **[Vision]**, and
   `--export=NONE` implies `--get-user-env`; none of the author's Grace job scripts (about a thousand) used either flag **[earlier jobs]**. What
   Grace's Slurm does with them is **[NOT VERIFIED]**, so `mpd` leaves them out.
@@ -352,8 +673,10 @@ echo "MPD_STAGE_DONE train"
   `BASHRCSOURCED: unbound variable` on Grace **[earlier jobs]**.
 - **Everything writable is under `$MPD_HOME`**: the caches, and `HF_HOME` for stray Hugging Face writes. `PYTHONNOUSERSITE=1` keeps
   `~/.local` out of the job.
-- **Offline.** `HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1` (above). A `MPD_MODEL_<KEY>`, `MPD_MODELS_DIR` or `MPD_FOLDSEEK` set in your shell when
-  you submit is copied into the script as an `export`, and so is every `--env NAME=VALUE`.
+- **Offline.** `HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1` (above). These shell variables are copied into the script as an `export` when you submit:
+  `MPD_MODEL_<KEY>`, `MPD_MODELS_DIR`, `MPD_FOLDSEEK` (always as absolute paths), `MPD_3DI_ENGINE`, `MPD_DTYPE`, `MPD_TF32`, `MPD_KEEP_ALL_CHECKPOINTS` and
+  `MPD_CKPT_EVERY`; so is every `--env NAME=VALUE`. `MPD_STRUCTURE_LEGACY_MASK` reaches a job only through `--env`, never from the shell (a shell that exports it
+  gets a plan warning), and a relative path in `--env MPD_FOLDSEEK`, `MPD_MODELS_DIR` or `MPD_MODEL_<KEY>` is a plan error **[CPU]**.
 - **GPU stages check the GPU.** `nvidia-smi -L` must work, and the stage itself stops with `MPD_NO_GPU` (exit 31) if CUDA is unusable.
   `MPD_JOB_START` is the first line a job prints; `MPD_STAGE_DONE` the last.
 - **`--comment` carries a per-submission tag**, which `mpd status`, `mpd cancel` and the retry after a controller error use to find this
@@ -408,14 +731,38 @@ total, which includes the GPUs. Budget with the plan's number. `maxconfig -f <sc
 ### Budget
 
 - The plan's total is an upper bound (every task for its whole requested walltime) and an estimate. For the README example
-  (`esm2-3b` to `esm2-650m`, `score-all`, evaluated on both benchmarks) it is **1,806 SU, 9% of 20,000** (**simulated** plan; **[HPRC]**
-  for the allocation). With `esm2-3b` as the student (teacher `esm2-650m`) the plan is 4,983 SU, 25%, with 1-16:00:00 of training at
+  (`esm2-3b` to `esm2-650m`, `score-all`, evaluated on both benchmarks) it is **1,806 SU, 9% of 20,000** (**simulated** plan: teacher 03:00:00,
+  train 10:15:00, score 00:30:00; **[HPRC]** for the allocation). With `esm2-3b` as the student (teacher `esm2-650m`) the plan is 4,983 SU, 25%, with 1-16:00:00 of training at
   micro-batch 1 (**simulated**).
 - `*-one` methods train one student per assay, so the training line is multiplied by the number of assays: `score-one` over all 217
   ProteinGym assays plans to **184,700 SU**, about nine times the Basic allocation (**simulated**). `mpd submit` refuses a plan above
   `--max-su` (default 10,000) and says why; `plan` and `--dry-run` only warn. Use `*-one` for a few assays.
-- Changing only `--eval-data`, `--gpu`, `--cluster`, `--score-shards`, a walltime override, `--sbatch-arg`, `--module` or `--env` makes
-  a **new campaign**, which retrains. `--home`, `--python` and `--account` do not **[CPU]**.
+- Changing only `--eval-data`, `--gpu`, `--train-gpus`, `--cluster`, `--score-shards`, `MPD_DTYPE` or `MPD_TF32` makes a **new campaign**, which
+  retrains. Walltime overrides, `--array-throttle`, `--sbatch-arg`, `--module`, other `--env` pairs, `--account`, `--home` and `--python` do not
+  ([recipes](#what-starts-a-new-campaign-and-what-does-not)) **[CPU]**.
+
+## SaProt on Grace
+
+SaProt-35M and SaProt-650M are `available` in `mpd models`, with these labels wherever the status is stated: **tested on CPU only** (tiny random models, a fake
+Foldseek, one by-hand `prepare` run on real data); nothing has run on Grace or on a GPU; the pinned Foldseek release 10-941cd33 was never executed;
+SaProt on VenusMutHub needs the structure deposit that is not published yet (`mpd fetch venus-structures --from-dir`); bf16, GPU memory and walltime
+for SaProt are estimates. [SAPROT.md](SAPROT.md) has the details.
+
+- On a login node: `mpd fetch proteingym` (62.4 MB; it includes the AF2 structures SaProt reads), `mpd fetch foldseek` (about 12 MB, from github.com),
+  `mpd fetch model saprot-650m` (2.6 GB). Compute nodes have no internet. `mpd plan` and `mpd doctor` print what is still missing, with the command for each. If a login node cannot reach github.com, download `foldseek-linux-avx2.tar.gz` of release 10-941cd33 elsewhere and run `mpd fetch foldseek --from-file <archive>` (checked against the pinned sha256 before anything runs); `MPD_FOLDSEEK=/path/to/foldseek` uses a Foldseek you already have.
+- The 3Di strings are built by the `prepare` stage, a CPU job (8 CPUs, 32 GB, a fixed 4 hour request; no GPU service units). On the real ProteinGym and
+  VenusMutHub files (675 structures) `prepare` took 23 seconds on a loaded login node of another cluster, CPU only, with the earlier
+  study's Foldseek build **[CPU]**; not measured on Grace, not run through Slurm.
+- `prepare` also checks that the weights of every model in the run are fetched, so a purged or never-fetched weights folder stops the CPU job within
+  minutes instead of the GPU job hours later.
+- Foldseek is a static `linux-avx2` binary. HPRC's Grace primer (Fall 2025) says the 940 nodes are based on the Intel Cascade Lake processor, which has
+  AVX2; the CPU of each partition is not documented there. **[NOT VERIFIED]** Run `mpd doctor` once; it runs `foldseek version`. A `noexec` mount would
+  stop it from running.
+- SaProt jobs ask for the same GPU shapes as the ESM2 model of the same size. The memory and walltime figures for SaProt are the ESM2 ones extrapolated
+  by size, marked as estimates, and have not been measured.
+- A teacher and a student from different families (SaProt with ESM2, either way): prefer `score-*`. `direct-*` trains the student's raw logits toward
+  the teacher's raw logits, which carry a per-position offset that differs between families; `score-*` subtracts it. Reasoned and unit-tested on random
+  numbers (`tests/test_saprot_offsets.py`), never measured on a real pair.
 
 ## Why jobs are offline
 
@@ -478,16 +825,20 @@ EsmForMaskedLM` with `MissingCUDAException: CUDA_HOME does not exist` **[earlier
 9. the SU rate of 72 per A100-hour and the 20,000 SU Basic allocation as of November 2026;
 10. what Slurm does when `--output` points at a missing directory (`mpd` creates `<campaign>/logs` before it submits);
 11. the output formats of `showquota` and `myproject` on Grace (`mpd` parses them tolerantly and never fails on them);
-12. how long the first `import torch` takes, and whether the 10-minute start-up allowance covers it plus a 3B model load.
+12. how long the first `import torch` takes, and whether the 10-minute start-up allowance covers it plus a 3B model load;
+13. everything under [Not verified](#not-verified) in the recovery section: `sacct` and `squeue` output on Grace, `--kill-on-invalid-dep`, the `--comment` tag, resume after a TIMEOUT on a GPU;
+14. for SaProt: that Foldseek runs on Grace (AVX2 on every partition, no `noexec` mount), that release 10-941cd33 gives the same 3Di strings as the build behind the
+    recorded SaProt numbers, and everything about SaProt on a GPU.
 
 To settle most of these once, run on a Grace login node (all are read-only; `sbatch --test-only` queues nothing):
 
 ```bash
-sbatch --version; scontrol show config | grep -E 'SLURM_VERSION|MaxArraySize|MaxJobCount|SchedulerParameters'
+sbatch --version; scontrol show config | grep -E 'SLURM_VERSION|MaxArraySize|MaxJobCount|SchedulerParameters|KillOnInvalidDep'
 sinfo -o '%P %l %D %G' | sort
 gpuinfo; gpuavail; maxconfig -f <a rendered .sbatch from mpd submit --dry-run>
 sacctmgr -n -P show qos format=Name,MaxJobsPU,MaxSubmitPU,MaxTRESPU,MaxWall
-showquota; myproject; module spider Python; module spider Anaconda3
+sacctmgr -n -P show assoc user=$USER format=Account,Partition,QOS,MaxJobs,MaxSubmit,GrpTRES
+showquota; myproject; module spider Python; module spider Anaconda3; module spider PyTorch
 sbatch --test-only <a rendered prepare.sbatch>
 ```
 

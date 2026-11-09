@@ -50,7 +50,9 @@ inside the deposit carries the per-source attribution.
 
 1. Test it from a clean home: `mpd fetch venus-structures --home <empty-folder>` must download, verify and unpack, and a second run must
    make no download.
-2. Change the statements that say "in preparation": the data table and the Venus structure sentence in [DATA.md](DATA.md), the README
+2. Change the statements that say "in preparation" or "not published yet": the data table and the Venus structure sentence in [DATA.md](DATA.md), the README
    (Models, data and licences; Status), the "Venus structures: availability" section of [SAPROT.md](SAPROT.md), the Venus row of
-   [LICENSES.md](LICENSES.md), and the line in `mpd fetch --list` (it reads from `sources.py`).
+   [LICENSES.md](LICENSES.md), the SaProt sections of [GRACE.md](GRACE.md#saprot-on-grace) and [TROUBLESHOOTING.md](TROUBLESHOOTING.md#saprot-and-foldseek), and in the code the
+   notes of `saprot-35m` and `saprot-650m` in `src/mpd/registry.py`, the message in `src/mpd/structure/__init__.py` and the line of `mpd fetch --list`
+   (it reads from `sources.py`).
 3. Say in the release notes ([CHANGELOG.md](../CHANGELOG.md)) that SaProt on VenusMutHub no longer needs a local copy.

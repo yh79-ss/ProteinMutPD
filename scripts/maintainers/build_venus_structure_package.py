@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the Zenodo deposit for the VenusMutHub structure set (maintainers only).
+r"""Build the Zenodo deposit for the VenusMutHub structure set (maintainers only).
 
 Inputs are the curation records of the original study (a `final_selection.jsonl` of per-protein source
 records, the curated PDB files they point to, and a JSON with the benchmark sequences). Output is a folder to

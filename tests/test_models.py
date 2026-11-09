@@ -624,6 +624,20 @@ def test_the_canonical_weights_message(tmp_path, no_model_env):
                               "Run on a login node: mpd fetch model esm2-3b --cluster grace")
 
 
+def test_the_message_of_a_job_names_the_cluster_and_the_home_it_looked_in(tmp_path, monkeypatch, no_model_env):
+    """A job knows its home and cluster from MPD_HOME and MPD_CLUSTER (the script exports both), and calls resolve() without a home."""
+    monkeypatch.setenv("MPD_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("MPD_CLUSTER", "grace")
+    with pytest.raises(ModelNotReady) as err:
+        models.resolve("esm2-8m")
+    assert str(err.value) == (f"weights for esm2-8m are missing ({tmp_path / 'home' / 'models' / 'esm2-8m'}). "
+                              f"Run on a login node: mpd fetch model esm2-8m --cluster grace --home {tmp_path / 'home'}")
+    monkeypatch.setenv("MPD_MODELS_DIR", str(tmp_path / "elsewhere"))              # the folder then does not follow the home
+    with pytest.raises(ModelNotReady) as err:
+        models.resolve("esm2-8m")
+    assert "--home" not in str(err.value) and "--cluster grace" in str(err.value)
+
+
 def test_several_models_get_one_table_and_one_command(tmp_path, monkeypatch, no_model_env):
     monkeypatch.setenv("MPD_MODEL_ESM2_8M", str(write_files(tmp_path / "mine", {"config.json": b"{}"})))
     with pytest.raises(ModelNotReady) as err:

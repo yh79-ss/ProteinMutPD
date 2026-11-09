@@ -37,7 +37,7 @@ def _download(url: str, target: Path, log: Callable[[str], None], *, timeout: in
             part.unlink(missing_ok=True)
             if attempt == RETRIES:
                 raise FetchError(f"could not download {url}: {exc}. On a cluster without internet access download the file "
-                                 f"elsewhere and pass it with --from-dir <folder holding it>.") from exc
+                                 f"elsewhere and pass it with --from-file <archive>.") from exc
             wait = 2 * attempt
             if isinstance(exc, urllib.error.HTTPError) and exc.code in (429, 503):
                 wait = min(int(exc.headers.get("Retry-After") or 0) or 20 * attempt, 180)       # honour the server's request
@@ -58,7 +58,7 @@ def _resolve_local(from_file: Path | str, pin: Tool) -> Path:
     if path.is_dir():
         path = path / pin.archive
     if not path.is_file():
-        raise FetchError(f"{path} not found (--from-dir / from_file); expected the {pin.archive} of release {pin.release}")
+        raise FetchError(f"{path} not found (--from-file); expected the {pin.archive} of release {pin.release}")
     return path
 
 

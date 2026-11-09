@@ -1095,7 +1095,8 @@ def stub_plan(tmp_path, *, campaign_id: str = "esm2-3b__esm2-650m__proteingym-sc
                  for k in range(score_chunks)]
         stages += parts
         stages.append(StubStage("evaluate", depends_on=["score-base", *[p.full_name for p in parts]]))
-    resolved = {"campaign_id": campaign_id, "teacher": "esm2-3b", "student": "esm2-650m", "score_shards": {d: shards for d in datasets}}
+    resolved = {"campaign_id": campaign_id, "teacher": "esm2-3b", "student": "esm2-650m", "cluster": cluster,
+                "score_shards": {d: shards for d in datasets}}
     return StubPlan(StubSpec(campaign_id), StubOptions(StubCluster(cluster), home), home / "runs" / campaign_id, stages, resolved,
                     ["stub warning"], nonce, campaign_id)
 

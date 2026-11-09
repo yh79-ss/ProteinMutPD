@@ -58,8 +58,10 @@ def render_script(plan: Plan, stage: Stage) -> str:
     head += [f"#SBATCH {validate_sbatch_flag(flag, f'{cluster.name} profile sbatch_extra')}" for flag in cluster.sbatch_extra]
     head += [f"#SBATCH {validate_sbatch_flag(flag)}" for flag in opts.extra_sbatch]
 
-    # The job inherits the environment of the shell that ran sbatch, so start clean. `set -u` comes after the module block:
-    # Lmod's init and /etc/bashrc read unset variables (Grace: "BASHRCSOURCED: unbound variable").
+    # The job inherits the environment of the shell that ran sbatch (Slurm's default), so drop what must not arrive: PYTHONPATH,
+    # PYTHONHOME and every MPD_* variable (MPD_ALLOW_HUB, MPD_STRUCTURE_LEGACY_MASK, ...); the exports below put back the planned ones.
+    # LD_LIBRARY_PATH and the like are left alone: the Grace job scripts that ran inherit them, and a module may add to them.
+    # `set -u` comes after the module block: Lmod's init and /etc/bashrc read unset variables (Grace: "BASHRCSOURCED: unbound variable").
     body = ["", "set -eo pipefail"]
     modules = [validate_module(m) for m in plan.modules]
     if modules:
@@ -71,12 +73,13 @@ def render_script(plan: Plan, stage: Stage) -> str:
                  f'module load {names} || {{ echo "MPD_MODULE_LOAD_FAILED {names}" >&2; exit 1; }}']
     else:
         body.append("if type module >/dev/null 2>&1; then module purge; fi")
-    body += ["unset PYTHONPATH PYTHONHOME", "set -u"]
+    body += ['for _v in $(compgen -e); do case $_v in MPD_*) unset "$_v";; esac; done; unset _v PYTHONPATH PYTHONHOME', "set -u"]
 
     cache = opts.home / "cache"
     planner_env, user_env = job_env(opts)
     body += [
-        f"export MPD_HOME={_quote(opts.home)} HF_HOME={_quote(opts.home / 'hf_cache')} XDG_CACHE_HOME={_quote(cache)} "
+        f"export MPD_HOME={_quote(opts.home)} MPD_CLUSTER={_quote(cluster.name)} HF_HOME={_quote(opts.home / 'hf_cache')} "
+        f"XDG_CACHE_HOME={_quote(cache)} "
         f"TORCH_HOME={_quote(cache / 'torch')} TRITON_CACHE_DIR={_quote(cache / 'triton')} MPLCONFIGDIR={_quote(cache / 'mpl')}",
         # weights are staged by `mpd fetch` and compute nodes have no internet
         "export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 TOKENIZERS_PARALLELISM=false PYTHONUNBUFFERED=1 PYTHONNOUSERSITE=1 "

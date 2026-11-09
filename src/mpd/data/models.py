@@ -345,7 +345,8 @@ def resolve(key: str, home: Path | str | None = None) -> str:
         return str(s.path)
     if hub:
         return info.hf_id
-    raise ModelNotReady(_not_ready([s], os.environ.get("MPD_CLUSTER") or None, None))
+    where = home or (None if os.environ.get("MPD_MODELS_DIR") else os.environ.get("MPD_HOME"))      # the fix must fetch to where this looked
+    raise ModelNotReady(_not_ready([s], os.environ.get("MPD_CLUSTER") or None, where or None))
 
 
 # -- fetching -----------------------------------------------------------------

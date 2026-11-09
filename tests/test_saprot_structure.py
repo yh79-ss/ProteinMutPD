@@ -752,8 +752,9 @@ def test_fetch_accepts_a_local_archive_or_the_folder_holding_it(tmp_path):
     one = tools.fetch_foldseek(tmp_path / "h1", pin=pin, from_file=archive, log=lambda m: None)
     two = tools.fetch_foldseek(tmp_path / "h2", pin=pin, from_file=archive.parent, log=lambda m: None)
     assert is_executable(one) and is_executable(two)
-    with pytest.raises(FetchError, match="not found"):
+    with pytest.raises(FetchError, match=r"not found \(--from-file\)") as err:
         tools.fetch_foldseek(tmp_path / "h3", pin=pin, from_file=tmp_path / "empty", log=lambda m: None)
+    assert "--from-dir" not in str(err.value)
 
 
 def test_the_executable_bit_comes_back_even_if_the_archive_lost_it(tmp_path):
@@ -805,9 +806,10 @@ def test_fetch_waits_out_rate_limits_and_explains_a_dead_server(tmp_path, monkey
         tools.fetch_foldseek(tmp_path / "home", pin=pin, url=f"{base}/{pin.archive}", log=lambda m: None)
     assert sleeps == [7]                                                    # Retry-After was honoured
     sleeps.clear()
-    with pytest.raises(FetchError, match="could not download.*--from-dir"):
+    with pytest.raises(FetchError, match=r"could not download.*pass it with --from-file <archive>\.") as err:
         tools.fetch_foldseek(tmp_path / "home2", pin=pin, url="http://127.0.0.1:9/none", log=lambda m: None)
     assert len(sleeps) == tools.RETRIES - 1
+    assert "--from-dir" not in str(err.value)                                  # `mpd fetch foldseek` has no such option
 
 
 def test_the_foldseek_pin_is_well_formed():

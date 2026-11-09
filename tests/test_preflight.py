@@ -291,6 +291,14 @@ def test_slurm_tools_by_level(cli_env):
     assert preflight.check_slurm_tools("doctor")[0].level == "ok"
 
 
+def test_a_dry_run_does_not_need_sbatch(cli_env):
+    """`mpd submit --dry-run` works anywhere: a machine without sbatch is reported, but it is not an error there."""
+    row = preflight.check_slurm_tools("submit", dry_run=True)[0]
+    assert row.name == "slurm" and row.level == "skip" and "work anywhere" in row.message
+    assert preflight.check_slurm_tools("submit", dry_run=False)[0].level == "error"
+    assert not preflight.has_errors(preflight.check_slurm_tools("submit", dry_run=True))
+
+
 def test_cost_guard_is_a_warning_in_a_plan_and_an_error_in_a_submit():
     plan = SimpleNamespace(total_su=348_702.0)
     assert preflight.check_cost(plan, 10_000, "plan")[0].level == "warn"

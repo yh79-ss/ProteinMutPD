@@ -29,11 +29,12 @@ mpd doctor --cluster grace                                   # the "weights" lin
 | `saprot-35m` | `westlake-repl/SaProt_35M_AF2` | `316cd401` | 136.9 MB | PyTorch pickle | MIT |
 | `saprot-650m` | `westlake-repl/SaProt_650M_AF2` | `d9b9ad00` | 2.61 GB | PyTorch pickle | MIT |
 
-All seven together are 17.48 GB; the five ESM2 models are 14.74 GB (`mpd fetch model --all` fetches every model the
-pipeline can use today). The SaProt weights can be fetched already, but the pipeline cannot run them until the structure
-inputs land (`mpd models` shows each model's status). The licences are the ones on the Hugging Face model cards, checked on
-2026-11-09; the AIDO model is a different case, see [below](#aido-is-never-fetched). The full commits are in
-`src/mpd/registry.py`, and the file names, sizes and sha256 in `src/mpd/data/models.tsv`:
+All seven together are 17.48 GB; the five ESM2 models are 14.74 GB. `mpd fetch model --all` fetches every model the pipeline
+can use, which includes both SaProt models (`mpd models` shows each model's status). SaProt also needs Foldseek and structure
+files; [SAPROT.md](SAPROT.md) lists them. The SaProt weights are PyTorch pickle files, so they need torch 2.7 or newer (the check is
+below). The licences are the ones on the Hugging Face model cards, checked on 2026-11-09; the AIDO model is a different case, see
+[below](#aido-is-never-fetched). The full commits are in `src/mpd/registry.py`, and the file names, sizes and sha256 in
+`src/mpd/data/models.tsv`:
 
 ```
 esm2-8m      c731040fcd8d73dceaa04b0a8e6329b345b0f5df
@@ -75,6 +76,22 @@ mpd fetch model esm2-3b --cluster grace --dry-run        # say what would be dow
 mpd fetch model esm2-3b --cluster grace --verify         # also re-hash the files that are already there
 mpd fetch model esm2-3b --cluster grace --force          # download everything again
 mpd fetch model --all --cluster grace                    # every model the pipeline can use
+```
+
+A dry run on an empty home (real output, a login node of another cluster, not Grace; the free space is that machine's):
+
+```text
+$ mpd fetch model esm2-3b --dry-run --cluster grace
+esm2-3b: dry run, nothing is written (facebook/esm2_t36_3B_UR50D @ 476b6399 -> /scratch/user/<netid>/mpd/models/esm2-3b, state: missing)
+  would download 7 file(s)
+    config.json  779 B
+    pytorch_model-00001-of-00002.bin  9.98 GB
+    pytorch_model-00002-of-00002.bin  1.39 GB
+    pytorch_model.bin.index.json  55.5 kB
+    special_tokens_map.json  125 B
+    tokenizer_config.json  95 B
+    vocab.txt  93 B
+  11.37 GB to fetch; 143.35 GB free under /scratch/user/<netid>/mpd
 ```
 
 How it behaves:
@@ -185,8 +202,11 @@ every repository was public, ungated and MIT, the pinned commit was still `main`
 between the file listing and the download endpoint. The weights themselves have been hashed from their bytes for `esm2-8m`,
 `esm2-650m` and `saprot-650m`; the files of `esm2-35m`, `esm2-150m`, `esm2-3b` and `saprot-35m` rest on that two-endpoint agreement.
 
+Loading real SaProt weights was done on CPU outside the download path: SaProt-35M from its pinned `pytorch_model.bin`, and SaProt-650M from
+the earlier study's converted safetensors (the pinned 650M `.bin` itself was not loaded; [SAPROT.md](SAPROT.md)).
+
 Not verified: anything on Grace itself (download speed from its login nodes, the cluster Python's TLS setup, quota behaviour on
-`$SCRATCH`, the 60-minute rule in practice), and loading the real SaProt weights.
+`$SCRATCH`, the 60-minute rule in practice), and any model on a GPU.
 
 ## For maintainers: changing a pin
 

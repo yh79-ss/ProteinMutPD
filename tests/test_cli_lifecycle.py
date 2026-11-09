@@ -239,6 +239,16 @@ def test_results_prints_both_readouts_base_versus_distilled_and_where_the_adapte
     assert "not backed up" in out and "rsync -av <netid>@grace.hprc.tamu.edu:" in out and "docs/RESULTS.md" in out
 
 
+def test_results_names_the_grace_host_only_for_a_grace_campaign(capsys, cli_env):
+    plan = stub_plan(cli_env.tmp, cluster="vision")
+    write_stub_campaign(plan)
+    root = make_results(plan)
+    rc, out, err = run_cli(capsys, "results", str(root))
+    assert rc == 0, err
+    assert "grace.hprc" not in out and "rsync" not in out and "not backed up" not in out        # nothing is known about Vision's storage
+    assert f"Copy what you want to keep out of {root}" in out and str(root / "train" / "all" / "checkpoint_00100") in out
+
+
 def test_results_by_id_and_when_the_evaluate_stage_has_not_run(capsys, cli_env):
     plan = stub_plan(cli_env.tmp)
     write_stub_campaign(plan)

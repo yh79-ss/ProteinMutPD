@@ -245,7 +245,7 @@ def test_after_cancel_a_plain_re_run_is_allowed_and_queues_the_campaign_again(ca
 
     rc, out, err = run_cli(capsys, *command(env, "--train-time", "10:00:00"))              # no --force
     assert rc == 0, (out, err)
-    assert "ended as cancelled; submitting it again" in out and campaigns(env) == [root]
+    assert out.count("the earlier submission of this campaign cancelled") == 1 and "; submitting it again" in out and campaigns(env) == [root]
     now = json.loads((root / "SUBMITTED.json").read_text())
     assert now["state"] == "submitted" and set(now["jobs"]) == set(STAGES)
     assert all(now["jobs"][s] != first[s] for s in STAGES)                                  # every stage is queued again
@@ -267,7 +267,8 @@ def test_after_cancel_the_stages_that_finished_are_not_queued_again(capsys, worl
     rc, out, err = run_cli(capsys, *command(env, "--train-time", "10:00:00"), *extra)
     assert rc == 0, (out, err)
     assert [c.info["stage"] for c in fs.calls("sbatch")[before:] if not c.test_only] == ["train", "score-base", "score", "evaluate"]
-    assert "finished  prepare" in out and "finished  teacher" in out and "ended as cancelled; submitting it again" in out
+    assert "finished  prepare" in out and "finished  teacher" in out
+    assert out.count("the earlier submission of this campaign") == 1 and "; submitting it again" in out        # said once, by the submission
     now = json.loads((root / "SUBMITTED.json").read_text())
     assert now["state"] == "submitted" and list(now["jobs"]) == STAGES
     assert now["jobs"]["prepare"] == first["prepare"] and now["jobs"]["teacher"] == first["teacher"]

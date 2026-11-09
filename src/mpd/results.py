@@ -23,6 +23,14 @@ def load_summary(campaign_dir: Path) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+def _cluster_name(campaign_dir: Path) -> str:
+    """The profile the campaign was planned for (resolved.json), or "" when it cannot be read."""
+    try:
+        return str(json.loads((Path(campaign_dir) / "resolved.json").read_text(encoding="utf-8")).get("cluster") or "")
+    except (OSError, ValueError, AttributeError):
+        return ""
+
+
 def selected_adapters(campaign_dir: Path) -> list[tuple[str, Path]]:
     """(unit, checkpoint folder) for every trained unit whose selected checkpoint is still on disk."""
     found = []
@@ -110,8 +118,11 @@ def files_and_adapters(campaign_dir: Path, *, max_listed: int = 5) -> str:
             lines.append(f"  ... and {len(adapters) - max_listed} more under {root / 'train'}")
     else:
         lines.append(f"adapters: none found under {root / 'train'} (training not finished, or the folder was moved)")
-    lines += ["", "This is scratch storage and it is not backed up. Copy what you want to keep, for example from your own computer:",
-              f"  rsync -av <netid>@grace.hprc.tamu.edu:{root}/{{evaluate,spec.json,resolved.json}} ./{root.name}/"]
+    if _cluster_name(root) == "grace":
+        lines += ["", "This is scratch storage and it is not backed up. Copy what you want to keep, for example from your own computer:",
+                  f"  rsync -av <netid>@grace.hprc.tamu.edu:{root}/{{evaluate,spec.json,resolved.json}} ./{root.name}/"]
+    else:
+        lines += ["", f"Copy what you want to keep out of {root}: results and adapters are only as safe as the disk they sit on."]
     return "\n".join(lines)
 
 

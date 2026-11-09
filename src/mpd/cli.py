@@ -366,15 +366,15 @@ def cmd_submit(args) -> int:
     blocked = state is not None and state.state in api.BLOCKING
     if blocked and not args.force:
         raise CliError(_already_submitted(name, state))          # before the checks, and before anything is written
-    checks = preflight.run_checks(spec, opts, plan=plan, level="submit", max_su=args.max_su)
+    checks = preflight.run_checks(spec, opts, plan=plan, level="submit", max_su=args.max_su, dry_run=args.dry_run)
     print("\n" + preflight.render(checks, mode="dry-run" if args.dry_run else "submit"))
     if preflight.has_errors(checks) and not args.dry_run:
         raise CliError(_refusal(checks))
     if blocked and args.dry_run:
         print(f"\ndry run: the campaign is {state.state}, so nothing was written")
         return 0
-    if state is not None and not blocked:
-        print(f"\nthe earlier submission of this campaign ended as {state.state}; submitting it again")
+    if state is not None and not blocked and args.dry_run:         # a real submit says it itself, with the reason, once the job queue is read
+        print(f"\nthe earlier submission of this campaign ended as {state.state}; a real submit queues it again and keeps its finished stages")
     scripts = write_campaign(plan, force=args.force)               # with --force the recipe files must be unchanged
     print(f"\nscripts written to {plan.campaign_dir / 'scripts'}")
     if args.dry_run:

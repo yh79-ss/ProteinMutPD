@@ -4,10 +4,11 @@
 #   python -m pip install -c constraints/grace.txt '.[train]'
 # A constraints file installs nothing by itself; it only fixes the versions pip may choose.
 #
-# "Tested" below: the whole suite (pytest -m "not slow and not gpu") was run on CPU, Linux x86_64, with exactly this set,
-# on Python 3.11.14, 3.12.3 and 3.13.12. Nothing has run on Grace or on a GPU. torch comes from PyPI with CUDA 12.8
-# libraries (`pip install --dry-run` resolves it without an extra index URL; not tried on Grace's drivers). The CPU runs
-# used the `2.10.0+cpu` wheel of the same release, which `==2.10.0` also matches. Python 3.14 was only resolved.
+# "Tested" below: on 2026-11-09 the suite was run on CPU, Linux x86_64, with exactly this set, on Python 3.11.14, 3.12.3 (Ubuntu's
+# own build) and 3.13.12: the CI steps (pytest -m "not slow and not gpu and not rehearsal", then pytest -m rehearsal).
+# Nothing has run on Grace or on a GPU. torch comes from PyPI with CUDA 12.8 libraries (`pip install --dry-run` resolves it
+# without an extra index URL; not tried on Grace's drivers). The CPU runs used the `2.10.0+cpu` wheel of the same release,
+# which `==2.10.0` also matches. Python 3.14 was only resolved.
 
 torch==2.10.0            # tested: 3.11, 3.12, 3.13 (CPU wheel); the reference environment has the cu128 wheel
 transformers==4.51.0     # tested: 3.11, 3.12, 3.13
@@ -26,4 +27,4 @@ scipy==1.14.1 ; python_version < "3.14"      # tested: 3.11, 3.12, 3.13
 pyyaml==6.0.3            # tested: 3.11, 3.12, 3.13
 
 # only for `pip install '.[structure]'` (MPD_3DI_ENGINE=biotite); biotite 1.6 needs Python 3.11 or newer
-biotite==1.6.0 ; python_version >= "3.11"    # tested: 3.11, 3.12, 3.13
+biotite==1.6.0           # tested: 3.11, 3.12, 3.13

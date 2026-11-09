@@ -1,8 +1,10 @@
 name: CI
 
-# GitHub-hosted runners have no GPU and no Slurm. This workflow checks the code, the packaging and the login-node
-# path (install without torch, plan, render sbatch scripts). It cannot show that a job runs on a cluster GPU.
-# It was rehearsed step by step on a Linux machine and checked with actionlint; it has not run on GitHub yet.
+# GitHub-hosted runners have no GPU and no Slurm. This workflow checks the code, the packaging, the login-node path
+# (install without torch, plan, render sbatch scripts) and, on the CPU, that the rendered scripts run. It cannot show that a
+# job runs on a cluster GPU.
+# It was rehearsed step by step on a Linux machine and validated against GitHub's published workflow schema; it has not run
+# on GitHub yet.
 
 on:
   push:
@@ -61,12 +63,25 @@ jobs:
       - name: Install CPU-only PyTorch at the pinned version
         run: python -m pip install -c constraints/grace.txt --extra-index-url https://download.pytorch.org/whl/cpu torch
       - name: Install the package with the train, structure and test extras
-        run: python -m pip install -c constraints/grace.txt -c constraints/ci.txt -e ".[train,structure,test]" setuptools
-      - name: Show versions
+        run: python -m pip install -c constraints/grace.txt -c constraints/ci.txt -e ".[train,structure,test]"
+      - name: Show versions and check that the installed set is consistent
         run: |
           python -c "import sys, torch, transformers, peft, numpy, scipy; print(sys.version.split()[0], 'torch', torch.__version__, 'transformers', transformers.__version__, 'peft', peft.__version__, 'numpy', numpy.__version__, 'scipy', scipy.__version__)"
+          python -m pip check
       - name: Test (CPU; no GPU, no Slurm, no network)
-        run: python -m pytest -q -ra -m "not slow and not gpu"
+        run: python -m pytest -q -ra -m "not slow and not gpu and not rehearsal"
+      - name: Rehearse the rendered job scripts on the CPU (tiny models, fake cluster tools)
+        # These tests run the scripts `mpd submit` writes with bash, stage by stage. pytest exits with 5 when no test is
+        # selected (a checkout without the rehearsal tests): accept that one code here and say so; any other code fails.
+        timeout-minutes: 25
+        run: |
+          status=0
+          python -m pytest -q -ra -m rehearsal || status=$?
+          if [ "$status" -eq 5 ]; then
+            echo "::warning::no test carries the rehearsal marker, so nothing was rehearsed"
+          elif [ "$status" -ne 0 ]; then
+            exit "$status"
+          fi
 
   login-node:
     # What a student does on a login node: install WITHOUT torch, plan, render the sbatch files.
@@ -101,8 +116,11 @@ jobs:
           for need in ("mpd/clusters/grace.yaml", "mpd/clusters/vision.yaml", "mpd/data/models.tsv",
                        "mpd/data/venusmuthub_single_mutant.tsv"):
               assert need in wheel, f"missing from the wheel: {need}"
+          stray = [n for n in wheel if n.startswith(("tests/", "docs/", "scripts/", "constraints/"))]
+          assert not stray, f"does not belong in the wheel: {stray}"
           sdist = [n.split("/", 1)[1] for n in tarfile.open(glob.glob("dist/*.tar.gz")[0]).getnames() if "/" in n]
-          for need in ("LICENSE", "constraints/grace.txt", "scripts/setup_env.sh", "docs/DATA.md"):
+          for need in ("LICENSE", "constraints/grace.txt", "scripts/setup_env.sh", "docs/DATA.md",
+                       "tests/test_packaging.py", "tests/golden_render/grace_train_ddp.sbatch"):
               assert need in sdist, f"missing from the sdist: {need}"
           print("wheel:", len(wheel), "files; sdist:", len(sdist), "files")
           PY
@@ -110,6 +128,7 @@ jobs:
         run: |
           python -m venv "$RUNNER_TEMP/login"
           "$RUNNER_TEMP/login/bin/python" -m pip install -c constraints/grace.txt dist/*.whl
+          "$RUNNER_TEMP/login/bin/python" -m pip check
           export PATH="$RUNNER_TEMP/login/bin:$PATH"
           if python -c "import torch" 2>/dev/null; then echo "torch must not be installed in this environment"; exit 1; fi
           mpd --version
@@ -125,6 +144,9 @@ jobs:
           for f in "${scripts[@]}"; do bash -n "$f"; done
           grep -l -e "--account=$ACCOUNT" "${scripts[@]}"
           if compgen -G "$home/runs/*/SUBMITTED.json" > /dev/null; then echo "a dry run left a submission marker"; exit 1; fi
+          # the dry run left an unsubmitted campaign, and `status` lists it without Slurm
+          mpd status --cluster grace --home "$home" | tee "$RUNNER_TEMP/status.txt"
+          grep -q unsubmitted "$RUNNER_TEMP/status.txt"
           # an empty home has no environment, data or weights, so doctor must report errors (exit 1), not crash
           status=0
           mpd doctor --cluster grace --home "$home" > "$RUNNER_TEMP/doctor.txt" 2>&1 || status=$?
@@ -133,8 +155,10 @@ jobs:
           test "$status" -eq 1
 
   docs:
+    # The pages are checked against the code: every command parses, links and anchors resolve, the quoted output and figures are
+    # the planner's. That needs the planner (numpy, scipy, PyYAML) but not torch.
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
         with:
@@ -142,10 +166,16 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
-      - name: Install pytest
-        run: python -m pip install -c constraints/ci.txt pytest
-      - name: Relative links in README, docs and the community files resolve
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            constraints/*.txt
+      - name: Install the package without torch, and pytest
+        run: python -m pip install -c constraints/grace.txt -c constraints/ci.txt -e . pytest
+      - name: Relative links and anchors in the README, docs and community files resolve
         run: python -m pytest -q -p no:cacheprovider tests/test_packaging.py -k test_docs_
+      - name: README and docs match the code
+        run: python -m pytest -q -p no:cacheprovider tests/test_docs.py tests/test_docs_numbers.py
       - name: Shell scripts parse
         run: |
           for f in scripts/*.sh; do bash -n "$f"; done

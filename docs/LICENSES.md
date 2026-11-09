@@ -18,7 +18,7 @@ below, and you accept them when you download them.
 | VenusMutHub (`AI4Protein/VenusMutHub`, revision `08a27d07`) | benchmark and training sequences | MIT (dataset card; Hugging Face licence tag `mit`) | `mpd fetch venusmuthub` |
 | Venus structure set (Zenodo deposit **in preparation**, [ZENODO.md](ZENODO.md)) | structures for SaProt | CC BY 4.0 for the deposit as a whole; it contains wwPDB entries (CC0 1.0), AlphaFold DB models (CC BY 4.0) and ESMFold predictions (`facebook/esmfold_v1`, MIT); attribution is in the deposit's README | `mpd fetch venus-structures`; not published yet |
 | ESM2 weights, 8M to 3B (`facebook/esm2_*`) | teacher and student | MIT (model cards) | available |
-| SaProt weights, 35M and 650M (`westlake-repl/SaProt_*_AF2`) | teacher and student | MIT (both model cards and the GitHub repository) | `planned`: fetchable, not yet connected to the stages ([SAPROT.md](SAPROT.md)) |
+| SaProt weights, 35M and 650M (`westlake-repl/SaProt_*_AF2`) | teacher and student | MIT (both model cards and the GitHub repository) | available: `mpd fetch model saprot-35m saprot-650m`; tested on CPU only ([SAPROT.md](SAPROT.md)) |
 | Foldseek | computes the 3Di structure alphabet SaProt reads | GPL-3.0 | downloaded from its owners by `mpd fetch foldseek`, run as a separate program, **never bundled** (below) |
 | biotite (optional, `MPD_3DI_ENGINE=biotite`) | pure-Python 3Di fallback | BSD-3-Clause | installed by you with pip |
 | AIDO.Protein-RAG-16B (`genbio-ai/GB.Protein-RAG-16B-proteingym-dms-zeroshot`) | teacher in the earlier study | GenBio AI Community License (`license: other` on Hugging Face) | **not included**; blocked as a teacher of non-AIDO students (below) |

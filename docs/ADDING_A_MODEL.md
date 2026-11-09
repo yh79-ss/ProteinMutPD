@@ -136,6 +136,7 @@ All run on CPU without a network or a GPU.
 | the manifest and the registry agree; every available model can be fetched; the docs page agrees with the code | `tests/test_models.py` (`test_manifest_has_the_documented_shape`, `test_every_pinned_model_is_in_the_registry_with_a_40_hex_commit`, `test_every_available_model_can_be_fetched`, the docs-page tests) |
 | a licence lock | `tests/test_licenses.py` |
 | the whole pipeline on the tiny model, including "a teacher identical to the student starts at zero loss" for both objectives | `tests/test_stages.py` with `tests/fx_stages.py` |
+| the same for a model with extra inputs (what `prepare` freezes, what each stage reads, the digests that make a stale teacher table or checkpoint count as stale, no label opened before `evaluate`) | `tests/test_saprot_pipeline.py` |
 
 Run a single file the way the contributing guide says; the pipeline test is the one that decides step 6.
 

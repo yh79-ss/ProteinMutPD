@@ -26,6 +26,10 @@ STAGE_KINDS = {"prepare", "teacher", "train", "score-base", "score", "evaluate"}
 
 
 # ---------------------------------------------------------------- the expected shape, written out independently of render.py
+# what the prologue drops from the environment of the shell that ran sbatch, before the planned exports put theirs back
+SCRUB = '''for _v in $(compgen -e); do case $_v in MPD_*) unset "$_v";; esac; done; unset _v PYTHONPATH PYTHONHOME'''
+
+
 def expected_header(plan, st) -> list[str]:
     cluster = plan.options.cluster
     gpu = cluster.gpus[st.gpu] if st.gpu else None
@@ -74,7 +78,7 @@ def assert_structure(plan, st, text: str, tmp_path: Path) -> None:
     prologue = ["set -eo pipefail"]
     prologue += (["type module >/dev/null 2>&1 || source /etc/profile", "type module >/dev/null 2>&1 || {", "module purge",
                   "module load " + " ".join(modules)] if modules else ["if type module >/dev/null 2>&1; then module purge; fi"])
-    prologue += ["unset PYTHONPATH PYTHONHOME", "set -u", "export MPD_HOME=", "export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1"]
+    prologue += [SCRUB, "set -u", "export MPD_HOME=", "export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1"]
     if gpu:
         prologue += ["export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True MPD_REQUIRE_CUDA=1", "nvidia-smi -L || {"]
     prologue += ['echo "MPD_JOB_START host=$(hostname) job=${SLURM_JOB_ID:-} stage=' + st.full_name + '"', "cd ",
@@ -113,7 +117,7 @@ def matrix_plans():
             yield pytest.param(make(cluster, spec_kw=dict(method=method)), id=f"{cluster}-{method}")
 
 
-@pytest.mark.parametrize("plan", matrix_plans())
+@pytest.mark.parametrize("plan", list(matrix_plans()))
 def test_every_stage_of_every_method_on_both_clusters(plan, tmp_path):
     scripts = render_all(plan)
     assert {s.name for s in plan.stages} == STAGE_KINDS
@@ -201,7 +205,7 @@ def test_vision_script_uses_its_qos_modules_and_case_sensitive_gres():
     text = render_script(plan, stage(plan, "train"))
     assert "#SBATCH --qos=standard" in text and "module load CUDA/12.8.0 ||" in text
     assert "#SBATCH --gres=gpu:H200:4" in text and "h200" not in text.replace("MPD", "")
-    assert text.index("module purge") < text.index("module load") < text.index("unset PYTHONPATH") < text.index("set -u")
+    assert text.index("module purge") < text.index("module load") < text.index("compgen -e") < text.index("set -u")
 
 
 def test_cpu_gres_option_gives_cpu_stages_a_gpu_request_on_sites_that_demand_one():
@@ -249,11 +253,17 @@ def test_the_single_task_chunk_runs_the_right_task(tmp_path):
 # ---------------------------------------------------------------- the prologue, executed
 def test_gpu_stage_prologue_sets_a_clean_environment(tmp_path):
     plan = make("grace", home=tmp_path / "home", spec_kw=dict(train_gpus=2), extra_modules=("Anaconda3/2024.02-1",))
-    run = ScriptRun(tmp_path, plan, "train")
+    stray = dict(MPD_ALLOW_HUB="1", MPD_STRUCTURE_LEGACY_MASK="1", MPD_CLUSTER="not-this-one", MPD_HOME="/stray/home",
+                 MPD_ACCOUNT="999", MPD_SOMETHING_ELSE="x", LD_LIBRARY_PATH="/stray/lib", MY_OWN_SETTING="kept")
+    run = ScriptRun(tmp_path, plan, "train", env=stray)
     done = run.run()
     assert done.returncode == 0, done.stderr
     env = run.job_env()
     assert "PYTHONPATH" not in env and "PYTHONHOME" not in env                    # stray paths of the submitting shell are gone
+    for name in ("MPD_ALLOW_HUB", "MPD_STRUCTURE_LEGACY_MASK", "MPD_ACCOUNT", "MPD_SOMETHING_ELSE"):
+        assert name not in env, f"{name} of the submitting shell reached the job"
+    assert env["MPD_CLUSTER"] == "grace" and env["MPD_HOME"] == str(plan.options.home)      # the plan's, not the shell's
+    assert env["LD_LIBRARY_PATH"] == "/stray/lib" and env["MY_OWN_SETTING"] == "kept"       # everything else is inherited, as Slurm does
     home = str(plan.options.home)
     assert env["MPD_HOME"] == home and env["HF_HOME"] == f"{home}/hf_cache" and env["XDG_CACHE_HOME"] == f"{home}/cache"
     assert env["TORCH_HOME"] == f"{home}/cache/torch" and env["TRITON_CACHE_DIR"] == f"{home}/cache/triton"
@@ -340,7 +350,7 @@ def test_forwarding_allowlist_and_absolute_paths(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     for name, value in dict(MPD_MODEL_ESM2_650M="weights/esm2-650m", MPD_MODELS_DIR="models", MPD_FOLDSEEK="tools/foldseek/bin/foldseek",
                             MPD_DTYPE="float32", MPD_TF32="1", MPD_KEEP_ALL_CHECKPOINTS="1", MPD_3DI_ENGINE="foldseek",
-                            MPD_CKPT_EVERY="100", MPD_STRUCTURE_LEGACY_MASK="1", MPD_HOME="/should/not/leak", MPD_CLUSTER="grace",
+                            MPD_CKPT_EVERY="100", MPD_STRUCTURE_LEGACY_MASK="1", MPD_HOME="/should/not/leak", MPD_CLUSTER="not-this-one",
                             MPD_ACCOUNT="999", MPD_PYTHON="/nope/python", MPD_ALLOW_HUB="1", MPD_REQUIRE_CUDA="0",
                             HF_HUB_OFFLINE="0", TRANSFORMERS_OFFLINE="0").items():
         monkeypatch.setenv(name, value)
@@ -351,8 +361,9 @@ def test_forwarding_allowlist_and_absolute_paths(tmp_path, monkeypatch):
                         "MPD_FOLDSEEK": f"{tmp_path}/tools/foldseek/bin/foldseek", "MPD_KEEP_ALL_CHECKPOINTS": "1",
                         "MPD_MODELS_DIR": f"{tmp_path}/models", "MPD_MODEL_ESM2_650M": f"{tmp_path}/weights/esm2-650m", "MPD_TF32": "1"}
     assert "MPD_STRUCTURE_LEGACY_MASK" not in text                                           # only through --env, see the next test
-    for private in ("/should/not/leak", "MPD_CLUSTER", "MPD_ALLOW_HUB", "/nope/python", "MPD_ACCOUNT"):
+    for private in ("/should/not/leak", "not-this-one", "MPD_ALLOW_HUB", "/nope/python", "MPD_ACCOUNT"):
         assert private not in text, private
+    assert " MPD_CLUSTER=grace " in text                                                      # the plan's cluster, for the messages of a job
     assert text.count("MPD_REQUIRE_CUDA=1") == 1 and "MPD_REQUIRE_CUDA=0" not in text      # the planner decides, not the shell
     assert "export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 " in text and "HF_HUB_OFFLINE=0" not in text      # jobs stay offline
     assert "#SBATCH --account=123456789012" in text                                           # MPD_ACCOUNT is the cli's default only if no --account

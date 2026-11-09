@@ -23,6 +23,7 @@ SLURM_DEFAULT_MAX_ARRAY_SIZE = 1001            # Slurm's default and the value o
 # every option a generated script may carry; the profile's own `sbatch_extra` flags are added per cluster
 ALLOWED_OPTIONS = {"job-name", "comment", "time", "nodes", "ntasks", "cpus-per-task", "mem", "gres", "partition", "account", "array",
                    "output", "error", "open-mode"}
+SCRUB = '''for _v in $(compgen -e); do case $_v in MPD_*) unset "$_v";; esac; done; unset _v PYTHONPATH PYTHONHOME'''   # the prologue's clean-up line
 PLACEHOLDER_NUMBERS = {"123456789012", "1234567890123"}      # CONTRACTS 9.8: these and runs of all 0 or all 9
 # written in pieces so that the identity scan of the repository does not find this file
 FORBIDDEN_TEXT = ("yi" + "hong", "prj-0" + "2", "mol-" + "cell", "Protein" + "OPD", "/scratch/" + "project", "vs" + "ts", "gh" + "p_",
@@ -133,8 +134,8 @@ def check_script(plan, st, text: str, scratch: Path) -> list[str]:
         module_lines = [i for i, ln in enumerate(lines) if re.search(r"\bmodule (purge|load)\b|\btype module\b|/etc/profile", ln)]
         if any(i > at for i in module_lines):
             bad("a module command comes after set -u")
-        if not ("set -eo pipefail" in lines[:at] and "unset PYTHONPATH PYTHONHOME" in lines[:at]):
-            bad("set -eo pipefail and unset PYTHONPATH PYTHONHOME must come before set -u")
+        if not ("set -eo pipefail" in lines[:at] and SCRUB in lines[:at]):
+            bad("set -eo pipefail and the line that drops PYTHONPATH, PYTHONHOME and the MPD_* variables must come before set -u")
         first_export = next((i for i, ln in enumerate(lines) if ln.startswith("export ")), len(lines))
         if first_export < at:
             bad("an export comes before set -u")
@@ -282,7 +283,7 @@ NEGATIVE_CONTROLS = [
     ("set -u before the modules", "train", lambda t: t.replace("\nset -u\n", "\n", 1).replace("set -eo pipefail\n", "set -eo pipefail\nset -u\n", 1),
      "module command comes after set -u"),
     ("no set -u", "train", lambda t: t.replace("\nset -u\n", "\n", 1), "set -u appears 0 times"),
-    ("an export before set -u", "train", lambda t: t.replace("\nset -u\n", "\n", 1).replace("unset PYTHONPATH PYTHONHOME\n", "unset PYTHONPATH PYTHONHOME\nexport A=1\nset -u\n", 1),
+    ("an export before set -u", "train", lambda t: t.replace("\nset -u\n", "\n", 1).replace(SCRUB + "\n", SCRUB + "\nexport A=1\nset -u\n", 1),
      "an export comes before set -u"),
     ("no guard", "train", lambda t: t.replace("exit 31", "exit 1"), "exit-31 GPU guard"),
     ("guard on a CPU stage", "prepare", lambda t: t.replace("export HF_HUB_OFFLINE", "nvidia-smi -L || { exit 31; }\nexport HF_HUB_OFFLINE"), "GPU rails"),

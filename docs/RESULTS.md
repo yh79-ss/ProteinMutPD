@@ -7,11 +7,15 @@ assays), through the real stages: the numbers mean nothing, the shapes are real.
 ## What is in a campaign directory
 
 `<home>/runs/<campaign id>/`. The id is `<teacher>__<student>__<train data>-<method>[__<assays>]__seed<N>[__<recipe hash>]__<8 hex>`; the last
-group hashes the options that change the tasks or scripts (evaluation data, cluster, GPU, shards, throttle, walltime overrides,
-`--sbatch-arg`, `--module`, `--env`), so the same recipe with another `--eval-data` is a different campaign.
+group hashes the options that can change the results or the layout of the results: evaluation data, cluster, GPU type, training GPU count,
+score shards, and the numerics variables `MPD_DTYPE`, `MPD_TF32` and `MPD_STRUCTURE_LEGACY_MASK`. So the same recipe with another `--eval-data`
+is a different campaign. Walltimes, `--array-throttle`, `--sbatch-arg`, `--module`, other `--env` pairs, the account, `--home` and `--python`
+are not part of the id: after a TIMEOUT or a bad node the recovery stays in the same campaign and finds the finished stages
+([GRACE.md](GRACE.md#when-a-job-does-not-finish)).
 
 ```text
 contexts/            the masked positions every stage reads (union, per unit, per evaluation dataset), MANIFEST.json; no labels
+                     (a SaProt campaign adds structures.json, the structure strings that `prepare` froze)
 teacher/             logits.npy (the teacher's 20-amino-acid logits per training context), COMPLETE.json
 train/<unit>/        CONFIG.json  COMPLETE.json  SELECTED.json  dev_curve.jsonl  train_steps.csv
                      checkpoint_<update>/   adapter_config.json  adapter_model.safetensors  README.md
@@ -21,7 +25,7 @@ spec.json  resolved.json  plan.json  tasks/<stage>.json  scripts/<stage>.sbatch
 logs/  SUBMITTED.json     (added by mpd submit: the Slurm output and error files, and the job ids)
 ```
 
-Listing of the tiny test campaign **[CPU]** (`logs/` and `SUBMITTED.json` are absent because it ran without Slurm; 188 KB in all):
+Listing of the tiny test campaign **[CPU]** (`logs/` and `SUBMITTED.json` are absent because it ran without Slurm; 79 KB in all):
 
 ```text
 contexts/{eval__proteingym,union,unit__all}.{json,npz}  contexts/MANIFEST.json
@@ -40,11 +44,13 @@ spec.json  resolved.json  plan.json  scripts/*.sbatch (6)  tasks/*.json (6)
 - `train/<unit>.partial/` is the resumable state while a unit is unfinished (about 32 MB for a 650M student, 71 MB for a 3B student;
   deleted on completion). `train/<unit>.incomplete-<epoch>/` is an earlier attempt that could not be resumed: delete it when you no
   longer need it. See [TROUBLESHOOTING.md](TROUBLESHOOTING.md#timeout-the-walltime-was-too-short).
-- A submitted campaign's recipe files (`spec.json`, `resolved.json`, `tasks/`) are never rewritten; only the scripts are, on `--force`.
+- A submitted campaign's recipe files (`spec.json`, `resolved.json`, `tasks/`) are never rewritten, whatever state its jobs are in; only the scripts
+  and `plan.json` are, on `--force` or when a cancelled or failed campaign is submitted again. A command that would write a different recipe into the
+  directory is refused ([GRACE.md](GRACE.md#a-different-recipe-is-refused)).
 - Every record the stages write (`teacher/COMPLETE.json`, `train/<unit>/CONFIG.json` and `COMPLETE.json`, each score shard `.json`,
   `evaluate/summary.json`) has a `provenance` block (mpd, torch, transformers, peft, Python, host, Slurm job id, time; on a GPU node the
   GPU and driver). It has no paths and can go into an issue.
-- A campaign directory is small. The tiny one is 188 KB; for a 650M student the adapter is about 11 MB (2.7 million float32 LoRA
+- A campaign directory is small. The tiny one is 79 KB; for a 650M student the adapter is about 11 MB (2.7 million float32 LoRA
   parameters), the logit tables are a few MB per unit and dataset, and the `*-one` methods write a few thousand small files over many
   assays. These are estimates from array sizes, **[NOT VERIFIED]** on a real run.
 
@@ -88,7 +94,7 @@ unit `base_macro_same_assays` and `delta_vs_base`:
 Prints the same numbers as tables. The output for the tiny campaign **[CPU]** (random models, so the correlations are noise):
 
 ```text
-campaign   esm2-35m__esm2-8m__proteingym-score-all__seed20260922__bb5ef21c__ead1d93f
+campaign   esm2-35m__esm2-8m__proteingym-score-all__seed20260922__bb5ef21c__c2c58eb6
 objective  score   readouts: delta and dual, both always reported
 
 frozen student (before training), macro Spearman over every assay of the dataset
@@ -104,7 +110,7 @@ proteingym  dual *   all        3  -0.0575    -0.0573        +0.0001
 * primary readout by this tool's convention (delta for direct-logit runs, dual for score runs). That convention is an assumption of the maintainer, not a confirmed standard; both readouts are always reported.
 ```
 
-It then lists the two result files, the adapter folder of each unit, and a reminder that scratch is not backed up with an `rsync` line.
+It then lists the two result files, the adapter folder of each unit, and, for a Grace campaign, a reminder that scratch is not backed up with an `rsync` line (a campaign of another cluster gets a plain reminder to copy what you keep).
 With more than 12 units (`*-one` over many assays) it prints one row per dataset and readout (`mean of N units (K improved)`); the per-unit values
 stay in `per_assay.csv`. Before the `evaluate` stage has finished it says `no results yet` and exits with status 1.
 

@@ -37,6 +37,25 @@ Every statement in this section is tested on CPU (`tests/test_cluster.py`).
 - `account` may be written as a number (`account: 123456789012`); `mpd` reads it as text.
 - Never put a real account number in a profile you share. Pass it with `--account` or `MPD_ACCOUNT`.
 
+### The messages
+
+| you see | it means | do |
+|---|---|---|
+| `cannot read cluster profile <path>: <reason>` / `cluster profile <path> not found` | the YAML file cannot be opened | check the path |
+| `unknown cluster <name>; use one of <profiles> or a path to a profile YAML` | `--cluster` is neither a packaged profile nor a `.yaml` / `.yml` file or a path with a `/` | `mpd clusters`; or `./mycluster.yaml` |
+| `: unknown field <x>; valid fields are` | a field the profile does not have | the spelling, or [the tables below](#top-level) |
+| `: missing required field <x>` | `node`, `gpus`, `default_gpu` and the fields inside them are required | add it |
+| `: expected a number, got <x>` / `: expected a whole number, got <x>` / `: expected true or false, got <x>` | the wrong type | a plain number, or `true` / `false` |
+| `: must be at least <n>, got <x>` | below the lowest allowed value | follow the message |
+| `: write the walltime as a quoted string such as "48:00:00" (got <x>)` | YAML read an unquoted `48:00:00` as a number | quote it |
+| `gpus: list at least one GPU type` | `gpus` is empty | add one |
+| `default_gpu: <x> is not one of the profile's GPUs (<list>)` | `default_gpu` names no key of `gpus` | one of the keys |
+| `resource_rule: expected proportional_to_node or fixed_per_gpu, got <x>` | an unknown rule | one of the two |
+| `sbatch_extra and modules must be lists` | a single string was given | a YAML list |
+| `sbatch_extra: <x> is not a --name or --name=value option without spaces` / `modules: <x> is not a module name (letters, digits, '_', '.', '+', '/', '-')` | the entry would not survive as a line of the job script | one option or one module per entry |
+| `storage.forbidden_prefixes: expected a list of absolute paths such as ["/home"]` | a relative or non-list value | a list of absolute paths |
+| `GPU keys are letters, digits, '_', '.' or '-' (got <x>)` | a key with a space or other character | letters, digits and `_ . -` |
+
 ## Top level
 
 | field | required | default | meaning |
@@ -195,7 +214,8 @@ The Vision profile (8 x H200 per node, partition `def`, `--qos=standard`, Slurm 
 | `--gres=gpu:h200:1` | rejected: "Requested node configuration is not available" |
 | `#SBATCH --get-user-env=L` | rejected: "option '--get-user-env' doesn't allow an argument" |
 | `--export=NONE` alone, or a bare `--get-user-env` | accepted |
-| 50 rendered scripts: 4 methods x the six stages, one-GPU and four-GPU training, a 1,001-task array with its single-task last chunk, `--sbatch-arg` and `--env` variants | all accepted |
+| the final renderer, 24 plans on the Vision profile (4 methods x 3 student sizes x both teacher backends): 132 scripts, 12 distinct `#SBATCH` header shapes | one `sbatch --test-only` per shape, all accepted; `squeue -u "$USER"` listed the same 8 lines before and after |
+| an earlier set of 50 scripts of the same renderer: 4 methods x the six stages, one-GPU and four-GPU training, a 1,001-task array with its single-task last chunk, `--sbatch-arg` and `--env` variants | all accepted |
 | CPU stages | accepted, with Vision's warning "this job requests no GPU. Jobs without a GPU request will soon be rejected"; `cpu: gres: "gpu:1"` removes it |
 | `scontrol show config` | `MaxArraySize = 1001`, `MaxJobCount = 10000` |
 

@@ -34,20 +34,26 @@ dependencies = [
 
 [project.optional-dependencies]
 # Compute nodes (prepare, teacher, train, score, evaluate). Ranges are loose on purpose; the tested set is
-# pinned in constraints/grace.txt: pip install -c constraints/grace.txt '.[train]'. torch 2.7.0 is the lowest release the
-# suite was run with (CPU); the newest compatible versions on 2026-11-09 (torch 2.15, transformers 4.57, peft 0.21) passed too.
+# pinned in constraints/grace.txt: pip install -c constraints/grace.txt '.[train]'. On 2026-11-09 the suite also passed on the
+# CPU with torch 2.7.0 (the floor) and with the newest versions the ranges allow (torch 2.15, transformers 4.57, peft 0.21).
 train = [
     "torch>=2.7",
     "transformers>=4.51,<5",
     "peft>=0.13",
 ]
-# Only for MPD_3DI_ENGINE=biotite (the default 3Di engine is Foldseek). biotite 1.6 needs Python 3.11.
+# Only for MPD_3DI_ENGINE=biotite (the default 3Di engine is Foldseek). biotite 1.6 needs Python 3.11, this package's floor.
 structure = [
-    "biotite>=1.6,<2; python_version >= '3.11'",
+    "biotite>=1.6,<2",
 ]
-test = ["pytest>=8"]
+# tests/test_packaging.py builds the wheel with the installed setuptools, so the test extra asks for one that can (the floor of
+# build-system.requires; a stock `python -m venv` seeds an older one and that test would skip).
+test = [
+    "pytest>=8",
+    "setuptools>=77.0.3",
+]
 dev = [
     "pytest>=8",
+    "setuptools>=77.0.3",
     "build",
     "twine",
     "ruff==0.17.4",
@@ -72,7 +78,7 @@ testpaths = ["tests"]
 markers = [
     "gpu: needs a CUDA device",
     "slow: loads a real pretrained checkpoint (needs network or a populated cache)",
-    "rehearsal: runs the job scripts that `mpd submit` writes, end to end on the CPU with tiny models and fake cluster tools",
+    "rehearsal: the long tier of tests/test_rehearsal.py, which runs the job scripts that `mpd submit` writes end to end on the CPU (the fast tier is not marked)",
 ]
 
 [tool.ruff]

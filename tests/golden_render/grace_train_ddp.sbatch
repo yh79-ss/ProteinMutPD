@@ -19,9 +19,9 @@ type module >/dev/null 2>&1 || source /etc/profile 2>/dev/null || true
 type module >/dev/null 2>&1 || { echo "MPD_MODULE_LOAD_FAILED the module command is not available (Anaconda3/2024.02-1)" >&2; exit 1; }
 module purge
 module load Anaconda3/2024.02-1 || { echo "MPD_MODULE_LOAD_FAILED Anaconda3/2024.02-1" >&2; exit 1; }
-unset PYTHONPATH PYTHONHOME
+for _v in $(compgen -e); do case $_v in MPD_*) unset "$_v";; esac; done; unset _v PYTHONPATH PYTHONHOME
 set -u
-export MPD_HOME=/nonexistent/mpd HF_HOME=/nonexistent/mpd/hf_cache XDG_CACHE_HOME=/nonexistent/mpd/cache TORCH_HOME=/nonexistent/mpd/cache/torch TRITON_CACHE_DIR=/nonexistent/mpd/cache/triton MPLCONFIGDIR=/nonexistent/mpd/cache/mpl
+export MPD_HOME=/nonexistent/mpd MPD_CLUSTER=grace HF_HOME=/nonexistent/mpd/hf_cache XDG_CACHE_HOME=/nonexistent/mpd/cache TORCH_HOME=/nonexistent/mpd/cache/torch TRITON_CACHE_DIR=/nonexistent/mpd/cache/triton MPLCONFIGDIR=/nonexistent/mpd/cache/mpl
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 TOKENIZERS_PARALLELISM=false PYTHONUNBUFFERED=1 PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1 OMP_NUM_THREADS=24
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True MPD_REQUIRE_CUDA=1
 export NCCL_DEBUG=WARN
