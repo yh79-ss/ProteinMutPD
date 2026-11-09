@@ -38,7 +38,9 @@ def finding(out: str, name: str) -> str:
 
 
 def test_both_saprot_models_are_available_and_aido_is_not(capsys):
-    rc, out, _ = run_cli(capsys, "models")
+    rc, listed, _ = run_cli(capsys, "models")
+    assert rc == 0 and "aido" not in listed.lower()                                 # not part of the release, so a student does not see it
+    rc, out, _ = run_cli(capsys, "models", "--all")
     row = {line.split()[0]: line for line in out.splitlines() if line.split() and line.split()[0] in ("saprot-35m", "saprot-650m", "aido-rag-16b")}
     assert rc == 0 and " available " in row["saprot-35m"] and " available " in row["saprot-650m"] and " planned " in row["aido-rag-16b"]
     flat = " ".join(out.split())                                               # notes are wrapped to the terminal width

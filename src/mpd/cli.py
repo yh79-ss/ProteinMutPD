@@ -38,7 +38,6 @@ typical order (details in README.md and docs/GRACE.md):
   mpd plan ...   then   mpd submit ...              see the plan and cost, then submit
   mpd status | logs | cancel | results CAMPAIGN     follow a campaign
 
-mpd is alpha: it has been tested on CPU with fake Slurm tools, not yet on a Grace GPU node (README.md, Status).
 Run `mpd doctor` first when something does not work, and paste `mpd doctor --report` into an issue."""
 
 
@@ -205,6 +204,7 @@ def _parser() -> argparse.ArgumentParser:
 
     p = add("models", cmd_models, "list models: roles, status, licence, download size and whether the weights are fetched")
     where(p)
+    p.add_argument("--all", action="store_true", help="also list the models this release does not offer (licence-locked)")
     add("clusters", cmd_clusters, "list cluster profiles")
     p = add("assays", cmd_assays, "list the assay ids of a fetched dataset")
     p.add_argument("--dataset", choices=DATASETS, help="default: both")
@@ -658,14 +658,15 @@ def cmd_models(args) -> int:
     width = max(60, shutil.get_terminal_size((100, 24)).columns)
     header = ["key", "family", "params", "roles", "status", "license", "download"] + (["weights"] if home else [])
     rows = []
-    for m in registry.MODELS.values():
+    offered = [m for m in registry.MODELS.values() if args.all or not m.output_family_lock]       # a student sees what it can use
+    for m in offered:
         pin = pins.get(m.key)
         rows.append([m.key, m.family, f"{m.params_m / 1000:g}B" if m.params_m >= 1000 else f"{m.params_m:g}M",
                      "+".join(m.roles), m.status, m.license or "-", models.human_bytes(pin.total_bytes) if pin else "-"]
                     + ([_model_state(models, m.key, home)] if home else []))
     lines = table(header, rows, left=(0, 1, 3, 4, 5, 7))
     print(lines[0])
-    for line, m in zip(lines[1:], registry.MODELS.values()):
+    for line, m in zip(lines[1:], offered):
         print(line)
         for label, text in (("note", m.note), ("license terms", m.license_note)):
             if text:
@@ -710,7 +711,7 @@ def cmd_assays(args) -> int:
 def _list_models(args, models, home: Path | None) -> int:
     pins = models.pins()
     rows = []
-    for key in args.keys or list(registry.MODELS):
+    for key in args.keys or [k for k, m in registry.MODELS.items() if not m.output_family_lock]:
         info, pin = registry.get(key), pins.get(key)
         source = f"{info.hf_id} @ {pin.revision[:10]}" if pin else f"{info.hf_id} (never fetched)"
         rows.append([key, source, str(len(pin.files)) if pin else "-", models.human_bytes(pin.total_bytes) if pin else "-",

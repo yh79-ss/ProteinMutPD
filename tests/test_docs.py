@@ -171,22 +171,32 @@ def test_the_command_checker_catches_what_it_should(tmp_path):
     assert not list(commands("```text\n$ mpd plan --nonsense\n```\n"))                  # transcripts are not commands
 
 
-def test_the_quick_start_is_one_block_with_the_whole_journey():
-    _, blocks = split_markdown(doc("README.md"))
+def test_the_readme_has_the_one_line_command_and_the_setup_before_it_is_needed():
     text = doc("README.md")
-    start = text.index("## Quick start on Grace")
-    first = next(b for b in blocks if b[1] > text[:start].count("\n"))
-    assert first[0] == "bash"
-    argvs = [argv for _, argv in commands("```bash\n" + "\n".join(first[2]) + "\n```\n")]
-    seen = [" ".join(a[:4]) for a in argvs]
-    for need in ("bash scripts/setup_env.sh", "mpd fetch proteingym", "mpd fetch venusmuthub", "mpd fetch model", "mpd doctor", "mpd plan",
-                 "mpd submit", "mpd status", "mpd logs <campaign> train", "mpd results <campaign>", "mpd cancel <campaign>"):
+    _, blocks = split_markdown(text)
+    bash = [b for b in blocks if b[0] == "bash"]
+    lines = [ln for _, _, body in bash for ln in body]
+    submit = [ln for ln in lines if ln.startswith("mpd submit")]
+    assert len(submit) == 1 and not submit[0].endswith("\\"), "the headline command is one line"
+    argv = next(a for _, a in commands("```bash\n" + submit[0] + "\n```\n"))
+    for flag in ("--cluster", "--account", "--teacher", "--student", "--method", "--train-data", "--eval-data"):
+        assert flag in argv, flag
+    assert text.index("## Run a distillation") < text.index("## Set up once") < text.index("## What happens after you submit")
+    setup = next(body for _, _, body in bash if any(ln.startswith("bash scripts/setup_env.sh") for ln in body))
+    seen = [" ".join(a[:4]) for _, a in commands("```bash\n" + "\n".join(setup) + "\n```\n")]
+    for need in ("bash scripts/setup_env.sh", "mpd fetch proteingym", "mpd fetch venusmuthub", "mpd fetch model", "mpd doctor"):
         assert any(s.startswith(need) for s in seen), need
-    body = "\n".join(first[2])
-    assert body.index("mpd plan") < body.index("mpd submit") < body.index("mpd status")
-    for marker in ("change 1 of 3", "change 2 of 3", "change 3 of 3"):
-        assert marker in body, marker
-    assert "--yes" in next(a for a in argvs if a[1:2] == ["scripts/setup_env.sh"])        # the question would swallow the next pasted line
+    assert "--yes" in next(a for _, a in commands("```bash\n" + "\n".join(setup) + "\n```\n") if a[1:2] == ["scripts/setup_env.sh"])
+    follow = "\n".join(next(body for _, _, body in bash if any(ln.startswith("mpd status") for ln in body)))
+    for need in ("mpd status", "mpd logs CAMPAIGN train", "mpd results CAMPAIGN", "mpd cancel CAMPAIGN"):
+        assert need in follow, need
+
+
+def test_the_readme_is_a_guide_for_students_not_a_status_report():
+    text = doc("README.md")
+    headings = [m[1] for line in text.splitlines() if (m := HEADING.match(line))]
+    assert not [h for h in headings if re.search(r"status|development|roadmap", h, re.I)], headings
+    assert not re.search(r"\baido\b|alpha|never run|not verified|tested on cpu", text, re.I)
 
 
 # -- links, tables, style ------------------------------------------------------------------------------------------------------------
@@ -408,8 +418,7 @@ def test_every_repository_path_the_docs_name_exists():
 
 
 DECISIONS = {
-    "README.md": ("--max-su", "default 10,000", "Python 3.11 or newer", "Anaconda3/2024.02-1", "GCCcore/13.2.0 Python/3.11.5", "MPD_ACCOUNT",
-                  "unconfirmed assumption of the maintainer", "clause 1.2.2", "never run with NCCL", "`--force`", "--dry-run"),
+    "README.md": ("--dry-run", "`--force`", "docs/LICENSES.md"),
     "docs/GRACE.md": ("--max-su", "Python 3.11 or newer", "Anaconda3/2024.02-1", "GCCcore/13.2.0 Python/3.11.5", "--from-file", "MPD_ACCOUNT",
                       "one GPU by default", "continue or repair", "never queues a second copy", "--seed", "only the stages whose output files are missing",
                       "delete its marker file", "sbatch --test-only"),
@@ -467,8 +476,6 @@ def test_the_doctor_sample_is_what_doctor_prints_on_an_empty_home(capsys, grace_
 
 FIRST_RUN = ["--account", "123456789012", "--teacher", "esm2-8m", "--student", "esm2-8m", "--train-data", "proteingym", "--method", "score-all",
              "--eval-data", "proteingym", "--updates", "50", "--train-gpus", "1", "--score-shards", "proteingym=1"]
-README_RECIPE = ["--account", "123456789012", "--teacher", "esm2-3b", "--student", "esm2-650m", "--train-data", "proteingym", "--method", "score-all",
-                 "--eval-data", "proteingym", "venusmuthub"]
 
 
 def test_the_first_run_plan_in_grace_md_is_what_plan_prints(capsys, grace_shell):
@@ -479,16 +486,6 @@ def test_the_first_run_plan_in_grace_md_is_what_plan_prints(capsys, grace_shell)
     shown = [normal(line, grace_shell)[0] if line else "" for line in block_starting("docs/GRACE.md", "campaign   esm2-8m__esm2-8m")]
     assert shown == live
     assert len([line for line in normal(out, grace_shell) if line.startswith("warning: ")]) == 5
-
-
-def test_the_stage_table_in_the_readme_is_the_plan_of_its_example(capsys, grace_shell):
-    rc, out, err = run_cli(capsys, "plan", "--cluster", "grace", *README_RECIPE)
-    assert rc == 0, err
-    table = block_starting("README.md", "stage          tasks")
-    live = normal(out, grace_shell)
-    first = live.index(table[0])
-    assert live[first:first + len(table)] == table
-    assert "1,806 SU" in out
 
 
 def test_mpd_clusters_in_clusters_md_is_what_clusters_prints(capsys):

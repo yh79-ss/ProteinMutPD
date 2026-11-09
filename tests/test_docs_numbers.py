@@ -1,4 +1,4 @@
-"""The figures that README.md and docs/GRACE.md quote, against the planner, the Grace profile and the pinned sources.
+"""The figures that docs/GRACE.md, docs/DATA.md and the README quote, against the planner, the Grace profile and the pinned sources.
 
 Each figure is recomputed from the code and must appear in the page that quotes it. A change to the resource model, the presets, the registry or a pin
 therefore fails here until the pages are updated. The planner never needs a GPU, Slurm or data: ProteinGym's 217 assay ids are only counted, so the
@@ -60,10 +60,9 @@ def every_assay():
 def test_the_readme_example_costs_what_the_pages_say():
     plan = readme_example()
     total = round(plan.total_su)
-    assert total == 1806, "the resource model changed: update README.md and docs/GRACE.md"
-    assert f"{total:,} SU, {percent(total)} of a 20,000 SU Basic allocation" in flat(README)
+    assert total == 1806, "the resource model changed: update docs/GRACE.md"
     assert f"{total:,} SU, {percent(total)} of 20,000" in flat(GRACE)
-    assert hms(stage(plan, "train").walltime_s) == "10:15:00" and "10:15:00" in README and "10:15:00" in GRACE
+    assert hms(stage(plan, "train").walltime_s) == "10:15:00" and "10:15:00" in GRACE
     assert hms(stage(plan, "teacher").walltime_s) == "03:00:00" and hms(stage(plan, "score").walltime_s) == "00:30:00"
 
 
@@ -73,7 +72,7 @@ def test_the_first_run_costs_what_the_pages_say():
     assert total == 133
     assert [round(s.su_estimate) for s in plan.stages] == [32, 24, 24, 24, 24, 4]
     assert [hms(s.walltime_s) for s in plan.stages] == ["04:00:00", "00:15:00", "00:15:00", "00:15:00", "00:15:00", "01:00:00"]
-    assert f"{total} SU" in README and f"{total} SU" in GRACE
+    assert f"{total} SU" in GRACE
     assert f"{total} SU is {percent(total)} of a 20,000 SU allocation" in flat(GRACE)
     assert 0.1 < 100 * total / BASIC_ALLOCATION_SU < 1
 
@@ -83,9 +82,7 @@ def test_the_prepare_and_evaluate_stages_ask_for_what_the_pages_say():
     prepare, evaluate = stage(plan, "prepare"), stage(plan, "evaluate")
     assert (prepare.cpus, prepare.mem_gb, hms(prepare.walltime_s), round(prepare.su_estimate)) == (8, 32, "04:00:00", 32)
     assert (evaluate.cpus, evaluate.mem_gb, hms(evaluate.walltime_s)) == (4, 16, "01:00:00")
-    for page in (README, GRACE):
-        assert "04:00:00" in page and "8 CPUs" in page and "32 GB" in page
-    assert "its 32 SU is an upper bound" in flat(README)
+    assert "04:00:00" in GRACE and "8 CPUs" in GRACE and "32 GB" in GRACE
 
 
 def test_the_big_student_and_the_every_assay_figures():
@@ -95,7 +92,7 @@ def test_the_big_student_and_the_every_assay_figures():
     assert stage(big, "train").walltime_s == (1 * 24 + 16) * 3600
     many = every_assay()
     assert round(many.total_su, -2) == 184_700
-    assert "184,700 SU" in README and "184,700 SU" in GRACE
+    assert "184,700 SU" in GRACE
     assert 8.5 < many.total_su / BASIC_ALLOCATION_SU < 9.5 and "about nine times the Basic allocation" in GRACE
 
 
@@ -145,7 +142,7 @@ def test_the_login_node_and_cost_guard_figures():
     grace = Cluster.load("grace")
     assert (grace.login_max_cores, grace.login_max_minutes) == (8, 60)
     assert "stops by itself after 55 minutes" in flat(GRACE) and grace.login_max_minutes - 5 == 55
-    assert cli.DEFAULT_MAX_SU == 10_000 and "default 10,000" in README and "default 10,000" in GRACE
+    assert cli.DEFAULT_MAX_SU == 10_000 and "default 10,000" in GRACE
     assert cli.EXIT_BUDGET == 3 and "exits with status 3" in flat(GRACE)
 
 
@@ -158,7 +155,7 @@ def test_the_retry_and_checkpoint_figures():
     assert "up to 6 tries and about 15 minutes" in flat(GRACE) and "(try <k> of 6)" in (REPO / "docs" / "TROUBLESHOOTING.md").read_text()
     source = (REPO / "src" / "mpd" / "stages" / "train.py").read_text(encoding="utf-8")
     assert re.search(r"^CKPT_EVERY = 200\b", source, re.M)                                    # torch is not imported to read it
-    assert "every 200 updates" in README and "200 unless you changed it" in GRACE
+    assert "200 unless you changed it" in GRACE
 
 
 def test_the_walltime_model_constants_in_grace_md():
@@ -183,13 +180,14 @@ def megabytes(n: int) -> str:
 def test_the_download_sizes_the_pages_quote():
     pins = models.pins()
     pair = pins["esm2-3b"].total_bytes + pins["esm2-650m"].total_bytes
-    assert models.human_bytes(pair) == "13.98 GB" and "13.98 GB" in README and "13.98 GB" in GRACE
+    assert models.human_bytes(pair) == "13.98 GB" and "13.98 GB" in GRACE
     assert "11.37 GB + 2.61 GB" in GRACE
-    assert models.human_bytes(sum(pins[k].total_bytes for k in ("esm2-8m", "esm2-35m", "esm2-150m", "esm2-650m", "esm2-3b"))) == "14.74 GB" in README
-    assert models.human_bytes(sum(p.total_bytes for p in pins.values())) == "17.48 GB" and "17.48 GB" in README
+    assert models.human_bytes(sum(pins[k].total_bytes for k in ("esm2-8m", "esm2-35m", "esm2-150m", "esm2-650m", "esm2-3b"))) == "14.74 GB" in GRACE
+    assert models.human_bytes(sum(p.total_bytes for p in pins.values())) == "17.48 GB" and "17.48 GB" in GRACE
+    assert "about 14 GB for these two" in README                                           # the README rounds the pair's 13.98 GB
     assert models.human_bytes(pins["esm2-8m"].total_bytes) == "31.4 MB" and "esm2-8m` (31 MB)" in GRACE
     proteingym = sum(f.size for f in sources.PROTEINGYM.files)
-    assert megabytes(proteingym) == "62.4 MB" and "62.4 MB" in README and "62.4 MB" in GRACE and "62.4 MB" in DATA
+    assert megabytes(proteingym) == "62.4 MB" and "62.4 MB" in GRACE and "62.4 MB" in DATA
     structures = next(f for f in sources.PROTEINGYM.files if f.name == "ProteinGym_AF2_structures.zip")
     assert f"{structures.size / 1e6:.1f} MB" == "19.2 MB" and f"{structures.size:,} bytes" in DATA
     foldseek = sources.FOLDSEEK
@@ -201,4 +199,4 @@ def test_the_venusmuthub_file_count():
     manifest = (REPO / "src" / "mpd" / "data" / sources.VENUSMUTHUB.manifest).read_text(encoding="utf-8").splitlines()
     files = len([line for line in manifest if line and not line.startswith("#")]) - 1                  # the header line
     assert files == 796, files
-    assert "796 small files" in README and "796 small files" in GRACE and "797" in README
+    assert "796 small files" in GRACE and "797" in GRACE

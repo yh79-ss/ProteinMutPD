@@ -54,7 +54,7 @@ This is not legal advice.
   written permission from GenBio and a change to the code.
 - The check is deliberately stricter than the licence's wording ("similar" models): deciding what is similar is GenBio's to say, not a
   script's, so every non-AIDO student is refused.
-- AIDO is listed in `mpd models` only so that the planner can explain this. As the earlier study's AIDO-teacher results cannot be
+- AIDO is listed by `mpd models --all` (not by plain `mpd models`) only so that the planner can explain this. As the earlier study's AIDO-teacher results cannot be
   produced under this rule, they cannot be reproduced with `mpd` ([RESULTS.md](RESULTS.md#comparing-with-the-earlier-study)).
 
 ### What the licence says

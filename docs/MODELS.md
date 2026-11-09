@@ -175,7 +175,7 @@ preflight check warns if the torch in the planning environment is older than 2.6
 
 ## AIDO is never fetched
 
-`aido-rag-16b` is in `mpd models` only so that `mpd` can say why it is not offered. It has no pinned files, and
+`aido-rag-16b` is listed only by `mpd models --all`, so that `mpd` can say why it is not offered. It has no pinned files, and
 `mpd fetch model aido-rag-16b` refuses and quotes the licence note: clause 1.2.2 of the GenBio AI Community License bars using AIDO
 outputs to train other models. See [LICENSES.md](LICENSES.md).
 

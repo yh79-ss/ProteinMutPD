@@ -112,7 +112,7 @@ def test_help_texts_say_what_is_true(capsys):
     with pytest.raises(SystemExit):
         main(["--help"])
     top = capsys.readouterr().out
-    assert "mpd doctor" in top and "tested on CPU with fake Slurm tools" in top
+    assert "mpd doctor" in top and "tested on CPU" not in top and "alpha" not in top           # the help is not a status report
     for command in ("plan", "submit", "status", "logs", "cancel", "results", "fetch", "models", "clusters", "assays", "doctor"):
         assert command in top
     with pytest.raises(SystemExit):
@@ -355,13 +355,16 @@ def test_a_slurm_rejection_is_a_one_line_error_with_the_hint(capsys, cli_env, mo
 
 
 # ---------------------------------------------------------------- models, clusters, assays
-def test_models_lists_everything_without_cutting_notes(capsys):
+def test_models_lists_what_a_student_can_use_without_cutting_notes(capsys):
     rc, out, _ = run_cli(capsys, "models")
     assert rc == 0
-    for key in registry.MODELS:
-        assert key in out
+    for key, info in registry.MODELS.items():
+        assert (key in out) == (not info.output_family_lock), key
+    assert "aido" not in out.lower() and "GenBio" not in out                              # a model this release does not offer is not listed
+    rc, everything, _ = run_cli(capsys, "models", "--all")
+    assert rc == 0 and all(key in everything for key in registry.MODELS)
     aido = registry.get("aido-rag-16b")
-    flat = " ".join(out.split())
+    flat = " ".join(everything.split())
     assert " ".join(aido.license_note.split()) in flat and " ".join(aido.note.split()) in flat      # whole texts, wrapped not cut
     assert "\u2026" not in out
     assert "2.61 GB" in out and "11.37 GB" in out and "MIT" in out
@@ -372,7 +375,9 @@ def test_models_shows_which_weights_are_fetched_when_a_home_is_known(capsys, cli
     override_weights(cli_env, monkeypatch, "esm2-650m")
     rc, out, _ = run_cli(capsys, "models", "--cluster", "grace", "--home", cli_env.home)
     rows = {line.split()[0]: line.split()[-1] for line in out.splitlines() if line.split() and line.split()[0] in registry.MODELS}
-    assert rc == 0 and rows["esm2-650m"] == "override" and rows["esm2-3b"] == "missing" and rows["aido-rag-16b"] == "-"
+    assert rc == 0 and rows["esm2-650m"] == "override" and rows["esm2-3b"] == "missing" and "aido-rag-16b" not in rows
+    rc, out, _ = run_cli(capsys, "models", "--all", "--cluster", "grace", "--home", cli_env.home)
+    assert rc == 0 and next(line for line in out.splitlines() if line.startswith("aido-rag-16b")).split()[-1] == "-"
 
 
 def test_clusters_lists_the_profiles_and_the_gpus_that_cannot_train(capsys):
@@ -505,7 +510,7 @@ def test_fetch_model_list_shows_pins_sizes_and_state(capsys, cli_env, monkeypatc
     rc, out, _ = run_cli(capsys, "fetch", "model", "--list", "--cluster", "grace", "--home", cli_env.home)
     row = next(line for line in out.splitlines() if line.startswith("esm2-8m"))
     assert rc == 0 and "facebook/esm2_t6_8M_UR50D @ c731040fcd" in row and "31.4 MB" in row and row.split()[-1] == "override"
-    assert "never fetched" in next(line for line in out.splitlines() if line.startswith("aido-rag-16b"))
+    assert not any(line.startswith("aido-rag-16b") for line in out.splitlines())                 # not offered, so not listed
 
 
 def test_fetch_foldseek_calls_the_structure_tools(capsys, cli_env, monkeypatch):

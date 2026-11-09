@@ -17,7 +17,7 @@ First public version (`0.1.0.dev0`). How far it has been checked:
   Grace, which has A100 GPUs, a Slurm version nobody has checked, and a typed `gpu:a100:N` request taken from HPRC documents.
 - All rendered job scripts, for both profiles, pass `bash -n` and a list of invariants (`tests/test_render_matrix.py`).
 - **Never run on TAMU Grace, never run on a GPU through Slurm, and the GitHub Actions workflow has not run on GitHub yet.**
-  The README status table and `docs/GRACE.md` list what is still unverified.
+  `docs/GRACE.md` lists what is still unverified.
 
 ### Added
 

@@ -83,7 +83,21 @@ $MPD_HOME/
   runs/         one folder per campaign (see RESULTS.md)
 ```
 
-How much of the quota a run takes is in the [README](../README.md#space-and-service-unit-budget).
+### How much space a run takes
+
+Disk, for the README's example (`esm2-3b` to `esm2-650m`, `score-all`, evaluated on both benchmarks; the environment size is measured for the pinned package versions in a reference environment; the
+download size is an estimate; the others are the pinned manifests and a real fetch):
+
+| what | download | on disk | files |
+|---|---|---|---|
+| Python environment (`$MPD_HOME/env`): torch 2.10 with CUDA 12.8 libraries, transformers, peft | 3 to 4 GB, cached in `cache/pip` | 7.7 GB | about 28,000 |
+| ESM2-3B and ESM2-650M weights (all five ESM2 models: 14.74 GB; all seven models: 17.48 GB) | 13.98 GB | 13.98 GB | 12 |
+| ProteinGym v1.3 | 62.4 MB | 1.2 GB | 421 |
+| VenusMutHub | 6.3 MB | 6.3 MB | 797 |
+| one campaign (`runs/<id>`) | | well under 100 MB (an estimate; the tiny CPU test campaign is 79 KB) | tens to hundreds |
+
+That is about 23 GB (about 27 GB while the pip cache is kept) and 29,600 files of the 1 TB and 250,000 files of `$SCRATCH`. A `*-one`
+campaign over many assays writes a few thousand small files.
 
 ## Set up once
 
@@ -281,8 +295,8 @@ says so. To change a job that is still waiting, `mpd cancel <campaign>` and subm
 
 ### Recipes
 
-The commands of the recipes below, in one place. `$TEACHER`, `$STUDENT` and `$RECIPE` are the three lines of the [README](../README.md#quick-start-on-grace); the first line is the
-command you ran the first time.
+The commands of the recipes below, in one place. `$TEACHER`, `$STUDENT` and `$RECIPE` stand for the choices of your first `mpd submit` command (the example here is the
+one in the [README](../README.md#run-a-distillation)); the first line is the command you ran the first time.
 
 ```bash
 TEACHER=esm2-3b STUDENT=esm2-650m
