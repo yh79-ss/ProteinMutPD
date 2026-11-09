@@ -6,6 +6,7 @@ before it is made executable. Foldseek is GPL-3.0 and is fetched from its owners
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import shutil
@@ -17,7 +18,7 @@ from pathlib import Path
 from typing import Callable
 
 from ..data import venus_structures as vs
-from ..data.fetch import FetchError
+from ..data.fetch import FetchError, _announced_length
 from ..data.sources import FOLDSEEK, Tool
 from .foldseek import FoldseekError, sha256_file, version
 
@@ -31,9 +32,12 @@ def _download(url: str, target: Path, log: Callable[[str], None], *, timeout: in
             with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "mpd-fetch"}), timeout=timeout) as resp, \
                     open(part, "wb") as out:
                 shutil.copyfileobj(resp, out, 1 << 20)
+                got, promised = out.tell(), _announced_length(resp)
+            if promised is not None and got < promised:           # http.client hands back a body that ended early as if complete
+                raise ConnectionError(f"the server ended the body after {got} of {promised} bytes")
             part.replace(target)
             return
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
             part.unlink(missing_ok=True)
             if attempt == RETRIES:
                 raise FetchError(f"could not download {url}: {exc}. On a cluster without internet access download the file "

@@ -11,6 +11,9 @@ from pathlib import Path
 PRIMARY_NOTE = ("* primary readout by this tool's convention (delta for direct-logit runs, dual for score runs). That "
                 "convention is an assumption of the maintainer, not a confirmed standard; both readouts are always reported.")
 MAX_UNITS = 12
+MEAN_KEYS = ("base_macro_same_assays", "macro_spearman", "delta_vs_base")       # the base, distilled and delta columns, in this order
+LEFT_OUT_NOTE = ("A unit is left out of a mean when its base or distilled Spearman is nan (constant predictions, or fewer than three "
+                 "variants); per_assay.csv has every unit.")
 
 
 def load_summary(campaign_dir: Path) -> dict | None:
@@ -66,8 +69,25 @@ def _mark(entry: dict, primary: str | None) -> str:
     return " *" if entry.get("primary") or (primary and entry.get("readout") == primary) else "  "
 
 
+def _finite(x) -> bool:
+    return isinstance(x, (int, float)) and math.isfinite(x)
+
+
 def _mean(group: list[dict], key: str) -> float:
-    return sum(g.get(key, math.nan) for g in group) / len(group)
+    return sum(g[key] for g in group) / len(group) if group else math.nan
+
+
+def _mean_row(dataset: str, tag: str, group: list[dict]) -> tuple[list[str], int]:
+    """The row that stands for a group of many units, and how many units it leaves out. The three means are taken over the same
+    units, those whose base, distilled and delta numbers are all defined (evaluate.py's macro skips nan in the same way)."""
+    used = [g for g in group if all(_finite(g.get(k)) for k in MEAN_KEYS)]
+    left_out = len(group) - len(used)
+    improved = sum(1 for g in used if g["delta_vs_base"] > 0)
+    units = f"{len(used)} of {len(group)}" if left_out else str(len(group))
+    detail = f"{improved} improved; {left_out} left out" if left_out else f"{improved} improved"
+    base, distilled, delta = (_mean(used, k) for k in MEAN_KEYS)
+    return [dataset, tag, f"mean of {units} units ({detail})", str(sum(int(g.get("assays", 0)) for g in group)),
+            _num(base), _num(distilled), _num(delta, signed=True)], left_out
 
 
 def format_results(summary: dict, campaign_dir: Path, *, max_units: int = MAX_UNITS) -> str:
@@ -89,18 +109,20 @@ def format_results(summary: dict, campaign_dir: Path, *, max_units: int = MAX_UN
             groups.setdefault((e.get("dataset", "?"), e.get("readout", "?")), []).append(e)
     if groups:
         rows = []
+        left_out = 0
         for (dataset, readout), group in sorted(groups.items()):
             tag = f"{readout}{_mark(group[0], primary)}"
             if len(group) > max_units:
-                improved = sum(1 for g in group if g.get("delta_vs_base", 0) > 0)
-                rows.append([dataset, tag, f"mean of {len(group)} units ({improved} improved)",
-                             str(sum(int(g.get("assays", 0)) for g in group)), _num(_mean(group, "base_macro_same_assays")),
-                             _num(_mean(group, "macro_spearman")), _num(_mean(group, "delta_vs_base"), signed=True)])
+                row, skipped = _mean_row(dataset, tag, group)
+                rows.append(row)
+                left_out += skipped
                 continue
             rows += [[dataset, tag, str(g.get("unit", "?")), str(g.get("assays", "")), _num(g.get("base_macro_same_assays")),
                       _num(g.get("macro_spearman")), _num(g.get("delta_vs_base"), signed=True)] for g in group]
         lines += ["", "distilled student against the same student before training, on the same assays"]
         lines += table(["dataset", "readout", "unit", "assays", "base", "distilled", "delta_vs_base"], rows, left=(0, 1, 2))
+        if left_out:
+            lines += ["", LEFT_OUT_NOTE]
     if not entries:
         lines += ["", "summary.json has no results"]
     return "\n".join([*lines, "", PRIMARY_NOTE])
@@ -119,8 +141,11 @@ def files_and_adapters(campaign_dir: Path, *, max_listed: int = 5) -> str:
     else:
         lines.append(f"adapters: none found under {root / 'train'} (training not finished, or the folder was moved)")
     if _cluster_name(root) == "grace":
+        names = "evaluate,spec.json,resolved.json" + (",train" if adapters else "")              # one line, however many units there are
         lines += ["", "This is scratch storage and it is not backed up. Copy what you want to keep, for example from your own computer:",
-                  f"  rsync -av <netid>@grace.hprc.tamu.edu:{root}/{{evaluate,spec.json,resolved.json}} ./{root.name}/"]
+                  f"  rsync -av <netid>@grace.hprc.tamu.edu:{root}/{{{names}}} ./{root.name}/"]
+        if adapters:
+            lines.append("train/ holds the adapter of every unit (the folders listed above) and its training logs.")
     else:
         lines += ["", f"Copy what you want to keep out of {root}: results and adapters are only as safe as the disk they sit on."]
     return "\n".join(lines)

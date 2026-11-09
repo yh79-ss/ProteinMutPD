@@ -11,7 +11,7 @@ import gzip
 import hashlib
 import io
 import tarfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 ARCHIVE_NAME = "proteinmutpd-venusmuthub-structures-v1.tar.gz"
 MANIFEST_NAME = "structures_manifest.tsv"
@@ -60,6 +60,18 @@ def write_manifest(rows: list[dict], path: Path) -> None:
             writer.writerow({c: row.get(c, "") for c in COLUMNS})
 
 
+def check_name(name: str, where: str) -> str:
+    """`name` as a clean relative path if joining it onto a folder cannot leave the folder, else a ValueError.
+
+    File names in a deposit's SHA256SUMS and manifest are written by whoever published it, so they are checked before use."""
+    path = PurePosixPath(name)
+    if not path.parts or path.is_absolute() or ".." in path.parts or "\\" in name:
+        raise ValueError(f"{where}: {name!r} is not a plain file name. A name may not be empty, start with '/', "
+                         "contain a backslash, or have a '..' part. Do not use these files. "
+                         "Download them again, or ask whoever gave them to you.")
+    return str(path)
+
+
 def read_manifest(path: Path) -> list[dict]:
     with open(path, newline="", encoding="utf-8") as fh:
         reader = csv.DictReader(fh, delimiter="\t")
@@ -71,6 +83,7 @@ def read_manifest(path: Path) -> list[dict]:
             raise ValueError(f"{path}: {row['protein_id']} has unknown source {row['source']!r}")
         if row["confidence_scale"] not in SCALE_TO_PERCENT:
             raise ValueError(f"{path}: {row['protein_id']} has unknown confidence_scale {row['confidence_scale']!r}")
+        check_name(row["file"] or "", path.name)
     return rows
 
 
@@ -113,12 +126,12 @@ def safe_extract_tar(archive: Path, dest: Path) -> list[Path]:
 
 
 def parse_sums(path: Path) -> dict[str, str]:
-    """`sha256sum`-format file -> {name: sha256}."""
+    """`sha256sum`-format file -> {name: sha256}. A name that would leave the folder it is joined onto is a ValueError."""
     sums = {}
     for line in path.read_text(encoding="utf-8").splitlines():
         if line.strip():
-            digest, name = line.split(maxsplit=1)
-            sums[name.lstrip("*").strip()] = digest
+            digest, *rest = line.split(maxsplit=1)
+            sums[check_name(rest[0].lstrip("*").strip() if rest else "", path.name)] = digest
     return sums
 
 

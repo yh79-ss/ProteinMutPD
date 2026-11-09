@@ -159,6 +159,19 @@ def _same_json(path: Path, text: str) -> bool:
         return False
 
 
+def _same_entries(old, new) -> bool:
+    """Two lists that hold the same entries in another order."""
+    def keyed(items) -> list[str]:
+        return sorted(json.dumps(x, sort_keys=True) for x in items)
+    return isinstance(old, list) and isinstance(new, list) and keyed(old) == keyed(new)
+
+
+def _shown(old, new) -> str:
+    """Both values in full, because a cut at 40 characters hid how two long lists differ. Lists with the same entries say so."""
+    text = f"{json.dumps(old)} on disk, {json.dumps(new)} now"
+    return text + (" (the same entries in another order)" if _same_entries(old, new) else "")
+
+
 def _what_differs(path: Path, text: str) -> str:
     """How a recipe file on disk differs from the one this command would write, in a few words."""
     try:
@@ -170,13 +183,16 @@ def _what_differs(path: Path, text: str) -> str:
     new = json.loads(text)
     if isinstance(old, dict) and isinstance(new, dict):
         keys = sorted(k for k in {*old, *new} if old.get(k, "<absent>") != new.get(k, "<absent>"))
-
-        def short(value) -> str:
-            return json.dumps(value)[:40]
-        shown = [f"{k}: {short(old.get(k, '<absent>'))} on disk, {short(new.get(k, '<absent>'))} now" for k in keys[:5]]
+        shown = [f"{k}: {_shown(old.get(k, '<absent>'), new.get(k, '<absent>'))}" for k in keys[:5]]
         return "; ".join(shown) + (f"; and {len(keys) - 5} more" if len(keys) > 5 else "")
     if isinstance(old, list) and isinstance(new, list):
-        return f"{len(old)} tasks on disk, {len(new)} now"
+        said = f"{len(old)} tasks on disk, {len(new)} now"
+        if len(old) != len(new):
+            return said
+        if _same_entries(old, new):
+            return said + " (the same tasks in another order)"
+        first = next((i for i, (a, b) in enumerate(zip(old, new)) if a != b), 0)
+        return said + f"; the first difference is task {first}: {_shown(old[first], new[first])}"
     return "different content"
 
 

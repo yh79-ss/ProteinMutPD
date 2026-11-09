@@ -112,7 +112,17 @@ proteingym  dual *   all        3  -0.0575    -0.0573        +0.0001
 
 It then lists the two result files, the adapter folder of each unit, and, for a Grace campaign, a reminder that scratch is not backed up with an `rsync` line (a campaign of another cluster gets a plain reminder to copy what you keep).
 With more than 12 units (`*-one` over many assays) it prints one row per dataset and readout (`mean of N units (K improved)`); the per-unit values
-stay in `per_assay.csv`. Before the `evaluate` stage has finished it says `no results yet` and exits with status 1.
+stay in `per_assay.csv`. A unit whose base or distilled Spearman is `nan` is left out of all three means, and the row says how many (`mean of M of N units (K improved; L left out)`). Before the `evaluate` stage has finished it says `no results yet` and exits with status 1.
+
+## The development split
+
+Training holds out a development set that picks the checkpoint to keep; it is never trained on. Whole positions go to development, never single
+variants. `--dev-fraction` (5% in the presets) is the target, but every sequence with at least two contexts keeps at least one for training
+and holds out at least `min(5, n-1)` for development, whatever the fraction says. For ProteinGym that is close to the target (5.3% to 5.8% in
+the tables of `direct-all` and `score-all`). VenusMutHub has many short assays, so `score-all` on it holds out about a quarter of the contexts
+(25.9% measured on the pinned files), and most of its `*-one` units train on fewer than ten contexts (500 of 793). `prepare` prints the
+realised share, writes the training and development counts of every unit to `contexts/MANIFEST.json` (`unit_split`), notes the units that
+train on fewer than ten contexts, and stops before any GPU stage if a unit has too few positions to be split at all.
 
 ## What the metrics mean
 
@@ -221,12 +231,10 @@ whole assay, take `mutated_sequence` and `DMS_score` from its CSV and correlate 
 ## Copying results off scratch
 
 `$SCRATCH` is not backed up and its purge rule is not documented **[NOT VERIFIED]**. From your own computer (this is the line
-`mpd results` prints, plus the adapter):
+`mpd results` prints; `train` holds the adapter of every unit and its training logs):
 
 ```bash
-rsync -av <netid>@grace.hprc.tamu.edu:/scratch/user/<netid>/mpd/runs/<campaign>/{evaluate,spec.json,resolved.json} ./<campaign>/
-mkdir -p ./<campaign>/train/all
-rsync -av <netid>@grace.hprc.tamu.edu:/scratch/user/<netid>/mpd/runs/<campaign>/train/all/checkpoint_02103 ./<campaign>/train/all/
+rsync -av <netid>@grace.hprc.tamu.edu:/scratch/user/<netid>/mpd/runs/<campaign>/{evaluate,spec.json,resolved.json,train} ./<campaign>/
 ```
 
 Keep `evaluate/` (the numbers), `spec.json` and `resolved.json` (the recipe), the `provenance` blocks (they are in those files) and the adapter

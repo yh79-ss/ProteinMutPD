@@ -9,6 +9,8 @@ from dataclasses import asdict, dataclass, field
 from . import registry
 from .constants import DATASETS, METHODS
 
+MAX_SEED = 2**32 - 1       # the training stage seeds numpy with it, which takes nothing larger
+
 
 class SpecError(ValueError):
     pass
@@ -33,6 +35,12 @@ class RunSpec:
     train_gpus: int | None = None            # data-parallel width for *-all training
     extra: dict = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        # A campaign is the same whatever order the datasets and assays were typed in. Keeping them sorted here means the recipe
+        # files (spec.json, resolved.json, tasks/) come out equal, so repeating a command in another order finds its campaign.
+        object.__setattr__(self, "eval_data", tuple(sorted(self.eval_data, key=str)))
+        object.__setattr__(self, "assays", tuple(sorted(self.assays, key=str)))
+
     # -- derived ----------------------------------------------------------
     @property
     def objective(self) -> str:
@@ -45,8 +53,9 @@ class RunSpec:
     @property
     def backend(self) -> str:
         """Teacher backend: the requested one, else `cache` if the teacher offers it, else `live`."""
-        if self.teacher_backend:
-            return self.teacher_backend
+        return self.teacher_backend or self._default_backend()
+
+    def _default_backend(self) -> str:
         return "cache" if "cache" in registry.get(self.teacher).teacher_backends else "live"
 
     @property
@@ -76,6 +85,11 @@ class RunSpec:
         data = asdict(self)
         data["eval_data"] = list(self.eval_data)
         data["assays"] = list(self.assays)
+        try:
+            if self.teacher_backend == self._default_backend():
+                data["teacher_backend"] = None      # the default spelled out is the same recipe as leaving the option out
+        except ValueError:                          # a teacher the registry does not know: validate() says so
+            pass
         return json.dumps(data, indent=2, sort_keys=True)
 
     @classmethod
@@ -132,6 +146,12 @@ class RunSpec:
             raise SpecError("--dev-fraction must be in (0, 0.5)")
         if self.train_gpus is not None and self.scope == "one":
             raise SpecError("--train-gpus applies to *-all methods; one-assay runs use one device")
+        if self.kl_weight is not None and self.objective == "score":
+            raise SpecError("--kl-weight is only valid with --method direct-all or direct-one. The score methods have no KL term, so "
+                            "the value would change nothing. Leave --kl-weight out.")
+        if not isinstance(self.seed, int) or not 0 <= self.seed <= MAX_SEED:
+            raise SpecError(f"--seed must be a whole number from 0 to {MAX_SEED}, not {self.seed}. Pick a number in that range, "
+                            "for example a date such as 20261109.")
 
 
 def _short(text: str) -> str:

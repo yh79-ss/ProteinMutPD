@@ -69,7 +69,7 @@ def test_output_family_lock_blocks_cross_family_distillation(monkeypatch):
 def test_campaign_id_is_deterministic_and_reflects_choices():
     a = spec(method="score-one", assays=("B", "A"))
     b = spec(method="score-one", assays=("A", "B"))
-    assert a.campaign_id() != b.campaign_id() or a.assays != b.assays   # order is part of the spec
+    assert a.campaign_id() == b.campaign_id() and a.assays == b.assays == ("A", "B")   # the typing order is not part of the spec
     assert spec().campaign_id() == spec().campaign_id()
     assert spec(updates=500).campaign_id() != spec().campaign_id()      # overrides never collide with defaults
     assert "seed7" in spec(seed=7).campaign_id()

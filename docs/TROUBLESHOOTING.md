@@ -30,6 +30,8 @@ Contents: [Setting up](#setting-up) | [What doctor and the plan table say](#what
 | `no Python environment at <home>/env. Run: <command>` | the venv does not exist (or `MPD_PYTHON` points elsewhere) | run the command shown: `bash scripts/setup_env.sh --cluster grace` |
 | `module <module> did not load. On Grace look for a Python module with:` | the default module is not on this system; it was never checked on Grace again (**[NOT VERIFIED]**) | `module spider Python`, then `bash scripts/setup_env.sh --cluster grace --modules "<module names>"`; or `--modules none --python /path/to/python3` |
 | `<python> is Python <version>; mpd needs 3.11 or newer. Load a newer Python module (module spider Python) or pass --python` | the module's Python is too old | load a newer Python module |
+| `is newer than the Python 3.13 that mpd was tested with` (a warning of `setup_env.sh`) | the module or `--python` gives Python 3.14 or newer; `mpd` was tested on 3.11, 3.12 and 3.13 only, and the pinned numpy and scipy have no 3.14 wheel | go on if you like; if the install or a job fails, build again with a 3.11 to 3.13 Python: `module spider Python`, then `bash scripts/setup_env.sh --cluster grace --modules "<module names>" --rebuild` |
+| `run this script with bash:  bash scripts/setup_env.sh --cluster grace` | you started the script with `sh` (or `dash`) | type the command shown: it starts with `bash` |
 | `unknown option <flag> (bash scripts/setup_env.sh --help)` | a flag the script does not have | `bash scripts/setup_env.sh --help` lists them |
 | `no terminal to ask on: pass --yes to go ahead` | the script asks "Continue? [y/N]" and has no terminal (a batch job, a pipe) | add `--yes` |
 | `setup_env.sh` ends without finishing after about an hour | the login-node limit (no process longer than an hour) **[HPRC]** | run the same command again: the wheels are cached in `<home>/cache/pip` and it continues |
@@ -55,6 +57,7 @@ The rows of the check table (`[ok]`, `[warn]`, `[FAIL]`, `[skip]`). The ones tha
 | ``<account> was not found in the output of `myproject` (its format is not parsed; look at it yourself)`` | `[warn] account`: the account is not in the text `myproject` printed | check with `myproject`; a wrong account is refused by Slurm at submit |
 | `interpreter <x> does not exist or is not executable` | `--python` or `MPD_PYTHON` names a missing file | the right path, or `bash scripts/setup_env.sh --cluster grace` |
 | `<path> has <n> files but no FETCHED.json, so the fetch may have been interrupted (it resumes)` | `[warn] data:...`: a fetch stopped half way | run the fetch command again |
+| `ProteinGym data is incomplete under <path>. It lacks <n> of <m> assay files, such as <file>. The fetch was probably cut off.` | `[FAIL] data:proteingym`: `mpd fetch proteingym` stopped while it was unpacking (the connection dropped, or the login node ended it), so `FETCHED.json`, which is written last, is missing; the row says `structure files` when the second zip was the one that stopped | run the command shown under the row again on a login node; it keeps what it downloaded and unpacks the rest |
 | ``running inside a Slurm job: compute nodes have no internet, so `mpd fetch` and `pip` will fail here; use a login node`` | `[warn] host`: `mpd` was started in a batch job or an `srun` session | use a login node |
 | ``<tools> not found on PATH (`mpd status`, `logs` and `cancel` need them)`` | `[warn] slurm`: `sbatch` exists but one of the others does not | a normal Grace login node has all four |
 | ``sbatch not found on PATH: submit from a Slurm login node (`mpd plan` and `mpd submit --dry-run` work anywhere)`` | `[FAIL] slurm` in `submit` on a machine without Slurm (`--dry-run` shows `[skip] slurm` there) | submit from the login node |
@@ -82,6 +85,8 @@ Run these on a login node: compute nodes have no internet.
 | `no folder with its files under <path> (looked for` | `--from-dir` found no folder for that model: it looks for `<key>/`, the repository name, a Hugging Face cache snapshot, and the folder itself | [MODELS.md](MODELS.md#no-internet-on-the-cluster) lists the layouts it accepts |
 | `cannot locate the models folder: pass --home or --cluster, or set MPD_HOME (or MPD_MODELS_DIR)` | no working root is known | `source .../activate`, or `--cluster grace` |
 | `incomplete download; the partial file is kept, run the command again` | the connection ended early | run the same command again; it resumes |
+| `could not download <url>: the server ended the body after <n> of <m> bytes` | the connection dropped before the whole file arrived; `mpd` already asked again a few times | run the same command again; if it keeps happening, fetch from another network and copy the folder with `--from-dir` |
+| `<file>: <name> is not a plain file name.` | `mpd fetch venus-structures` found a file name in the deposit's `SHA256SUMS` or manifest that would point outside the download folder (`../x`, a leading `/`, a backslash, an empty name); nothing was written for it | do not use that copy of the deposit: download it again, or ask whoever gave it to you |
 | `has no published Zenodo record yet. Pass --from-dir <folder with the files> or --zenodo-record <id>.` | `mpd fetch venus-structures` before the deposit is published | with a copy of the deposit: `--from-dir <folder>` ([ZENODO.md](ZENODO.md)) |
 | `structure set failed verification:` | the files of a Venus structure deposit do not match its `SHA256SUMS` | get the deposit again |
 | `unknown data source <x>; choose from <list>` | a misspelt source | `mpd fetch --list` |
@@ -98,8 +103,8 @@ The full list for weights is in [MODELS.md](MODELS.md#if-something-goes-wrong).
 | `NOT READY: <n> errors` at the end of `plan` or `submit --dry-run`, exit status 0 | the recipe is fine but something it needs is missing; plan and dry-run only report it | fix the `[FAIL]` lines; each has its command under it |
 | `not submitting: <n> problem(s) to fix first (the table above has the rest)` (exit status 2) | a real `submit` found the same problems and stopped before writing anything | fix them, run the same command again |
 | `campaign <id> was already submitted (jobs: <list>). Nothing was written.` | the same options give the same campaign id, and it is queued or finished | `mpd status <id>`; `mpd cancel <id>`; `--force` to continue or repair it (queued, running and finished stages are kept); or `--seed` for an independent run |
-| `campaign <id> was only partly submitted (queued: <list>). Nothing was written.` | a submission was interrupted (Ctrl-C, outage, killed shell) | `mpd status <id>`, then `mpd cancel <id>`, or the same command with `--force` to continue from the first missing stage |
-| `a submission of <id> started <when> and did not finish` | an earlier `mpd submit` was killed, or is still running in another terminal | `mpd status <id>`, then the same command with `--force` ([below](#the-same-command-again-and---force)) |
+| `campaign <id> was only partly submitted (queued: <list>). Nothing was written.` | a submission was interrupted (Ctrl-C, or an outage that lasted longer than the retries) | `mpd status <id>`, then `mpd cancel <id>`, or the same command with `--force` to continue from the first missing stage |
+| `a submission of <id> started <when> and did not finish` | an earlier `mpd submit` was cut off (a dropped ssh connection, a closed terminal, a killed shell), or is still running in another terminal | `mpd status <id>`, then the same command with `--force` ([below](#the-same-command-again-and---force)) |
 | `holds a campaign that ended as <state> and has a different recipe` / `already holds a submitted campaign with a different recipe` | a submitted campaign's recipe files are never rewritten, and this command would write different ones; the message names the file and the keys | run the `mpd` version that created the campaign, change `--seed` for a new campaign, or remove the directory (`mpd cancel` its jobs first) |
 | `estimated upper bound <n> SU is above --max-su <n>.` | the cost guard: a real `submit` stops (`plan` and `--dry-run` only warn). sbatch's own "Requested SUs" would not have shown it, because it counts CPUs only | read the plan; shrink it (fewer `--updates` or assays, `--gpu`), or pass `--max-su` on purpose |
 | `[train] requested <time> exceeds the <gpu> partition limit <limit>; Slurm would hold the job with PartitionTimeLimit.` | a walltime above the partition's limit | a shorter `--train-time`, more `--train-gpus`, or another GPU |
@@ -152,7 +157,7 @@ Each message names what is wrong. The ones people hit:
 | `is not an environment variable name` | an `--env` name with a space, a dash or a leading digit | letters, digits and `_` |
 | `cannot be set for jobs:` followed by `it is for login nodes and laptops; jobs run offline (HF_HUB_OFFLINE=1)` | `--env MPD_ALLOW_HUB=1` | jobs never download; fetch on a login node |
 | `must be one line of at most <n> characters without control characters` | an `--env` value with a newline | one line |
-| `is a relative path; jobs change directory, so it would not resolve. Give an absolute path` | a relative `--home`, `--python`, or a relative path in `--env` for `MPD_FOLDSEEK`, `MPD_MODELS_DIR` or `MPD_MODEL_<KEY>` | an absolute path |
+| `is a relative path; jobs change directory, so it would not resolve. Give an absolute path` | a relative path in `--env` for `MPD_FOLDSEEK`, `MPD_MODELS_DIR` or `MPD_MODEL_<KEY>` (a relative `--home` or `--python` is made absolute against the current directory) | an absolute path |
 | `has characters that Slurm directives cannot carry (spaces, quotes, '%', '$', '#' ...). Use a path made of letters, digits and _ . + @ : , = / -` | the working root or a log path has such a character | a plain path under `$SCRATCH` |
 | `may only contain letters, digits, '_', '.' and '-'` | an account with other characters | the number `myproject` prints |
 | `has characters outside letters, digits and _ . + -; check the assay ids` | an assay id with an unusual character | `mpd assays` lists the ids |
@@ -248,7 +253,8 @@ prints the last 20 lines for the first failed stage, with account numbers and yo
 | `not resuming: <reason>`, with a reason such as `it was written by a run with a different configuration`, `STATE.json is unreadable`, `the logs cannot be read` or `the saved parameters are not this model's trainable parameters` | the saved state did not belong to this run or is damaged; the unit starts at update 0 and the old attempt is kept as `*.incomplete-<epoch>` | read the reason; delete the `*.incomplete-*` folders when you no longer need them |
 | `Some weights of EsmForMaskedLM were not initialized ... contact_head ...` | harmless for SaProt (unused layers) | none |
 | `non-finite loss at update <n>` / `non-finite gradient norm at update <n>` / `the teacher produced non-finite logits` / `no finite development checkpoint` | the numbers broke down; the stage stops instead of saving garbage **[NOT VERIFIED]**: none of these has been seen | run the command again with `--force` (training resumes from its last save) and, if it repeats, report the log and the recipe |
-| `training and <n> development contexts; need both` | the recipe leaves no training or no development contexts (a very small assay with a large `--dev-fraction`) | a smaller `--dev-fraction`, or more data |
+| `training unit(s) have too few measured positions to be split into training and development contexts` from `prepare` | a `*-one` assay has fewer than two measured positions (17 of the 793 VenusMutHub assays are like that), so it cannot give both a training and a development context. `prepare` stops before any GPU stage runs | leave the assays it names out of `--assay` or `--assays-file` and submit again; that is a new campaign |
+| `training and <n> development contexts; need both` | the same problem found by `train`, which only happens for a campaign whose `prepare` ran with an older `mpd`. The `--dev-fraction` does not decide this: every sequence holds out at least `min(5, n-1)` positions | leave that assay out and submit again |
 | `launched with <n> process(es) but the plan has` | a training script was started by hand with another number of processes | submit with `mpd submit`, which writes the launcher line |
 | `MPD_CKPT_EVERY must be a whole number of updates, 0 or more (0 turns resumable checkpoints off); got <x>` | a bad value in the environment | a whole number, or unset it |
 | `shard files exist for counts <list>, expected exactly one` / `was written for <n> shards` / `some evaluation contexts were never scored` | `evaluate` found score shards of a plan with another `--score-shards` | repeat your original command with `--force`; leftover shard files of another count are ignored |
@@ -360,12 +366,10 @@ Every record the stages write (`teacher/COMPLETE.json`, `train/<unit>/CONFIG.jso
 UTC time, and on a GPU node the GPU name, count and driver. It holds no paths, so it can go into an issue.
 
 **Results.** `mpd results <campaign>` prints the tables and where the adapters are ([RESULTS.md](RESULTS.md)). `$SCRATCH` is not
-backed up. Copy what you want to keep from your own computer (the command is printed by `mpd results`):
+backed up. Copy what you want to keep from your own computer (the command is printed by `mpd results`; `train` holds the adapter of every unit and its training logs):
 
 ```bash
-rsync -av <netid>@grace.hprc.tamu.edu:/scratch/user/<netid>/mpd/runs/<campaign>/{evaluate,spec.json,resolved.json} ./<campaign>/
-mkdir -p ./<campaign>/train/all
-rsync -av <netid>@grace.hprc.tamu.edu:/scratch/user/<netid>/mpd/runs/<campaign>/train/all/checkpoint_02103 ./<campaign>/train/all/
+rsync -av <netid>@grace.hprc.tamu.edu:/scratch/user/<netid>/mpd/runs/<campaign>/{evaluate,spec.json,resolved.json,train} ./<campaign>/
 ```
 
 HPRC's portal and Globus also work for copying files off Grace.
@@ -413,10 +417,11 @@ mpd doctor --report
 ```
 
 It prints the `mpd` and Python versions and the check table with account numbers, your user name, your home and scratch paths,
-e-mail addresses and tokens removed (**[CPU]**; look it over before you post). Add:
+e-mail addresses and tokens removed, and without the lines `showquota` printed (**[CPU]**; the removal is a best effort, so look it over before
+you post). Add:
 
 - the exact command you ran, with `<ACCOUNT>` in place of your account number, and the campaign id;
-- the last lines of the failing stage's `.err` (`mpd logs <campaign> <stage> --err`) and the `provenance` block of its `COMPLETE.json`;
+- the last lines of the failing stage's `.err` (`mpd logs <campaign> <stage> --err`; account numbers, e-mail addresses and your user name are hidden, and `--raw` shows the file as written, so do not paste that) and the `provenance` block of its `COMPLETE.json`;
 - for a Slurm problem, the output of `sbatch --version` and the rejected line.
 
 Do not paste account numbers, user names, tokens, or raw `squeue`, `sacct`, `showquota` or `myproject` output (they contain your user

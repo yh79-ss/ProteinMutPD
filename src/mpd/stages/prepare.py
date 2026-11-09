@@ -14,6 +14,13 @@ from ..structure import build, structure_needs
 from .common import Campaign, stage_main, write_json
 
 
+def _fetch_cluster(c: Campaign) -> str | None:
+    """The profile name for the --cluster of a fetch command; None for a profile loaded from a YAML file, which `mpd fetch` cannot find by name."""
+    from ..slurm.cluster import available_clusters
+    name = c.resolved.get("cluster")
+    return name if name in available_clusters() else None
+
+
 def build_structures(c: Campaign, train_bm, parent: ContextTable, evals: dict):
     """contexts/structures.json: the 3Di strings of every sequence a structure-aware model reads, or None if none does.
 
@@ -28,10 +35,34 @@ def build_structures(c: Campaign, train_bm, parent: ContextTable, evals: dict):
     for dataset in eval_datasets:
         bm, full = evals[dataset]
         requests.setdefault(dataset, {}).update(build.assays_for(bm, full.hashes))
-    engine = build.open_engine(c.home, cluster=c.resolved.get("cluster"), explicit_home=True)
+    engine = build.open_engine(c.home, cluster=_fetch_cluster(c), explicit_home=True)
     structures = build.build_set(requests, c.home, engine)
     structures.save(c.stem_structures())
     return structures
+
+
+MIN_TRAIN_CONTEXTS = 10      # a unit with fewer still trains, but a handful of contexts decides its student and its checkpoint
+
+
+def unit_split(c: Campaign, tables: dict) -> dict[str, list[int]]:
+    """[training, development] contexts of each unit, split exactly as `train` will split them (the split never reads labels)."""
+    fraction = c.resolved["dev_fraction"]
+    return {unit: [int((~dev).sum()), int(dev.sum())] for unit, table in tables.items() for dev in [table.dev_mask(fraction)]}
+
+
+def check_split(split: dict[str, list[int]]) -> None:
+    """Fail now, on a CPU node, for a unit `train` would reject after the teacher stage; say so for a unit that trains on very little."""
+    unsplittable = [u for u, (train, dev) in split.items() if not train or not dev]
+    if unsplittable:
+        shown = ", ".join(unsplittable[:5]) + (f" (+{len(unsplittable) - 5} more)" if len(unsplittable) > 5 else "")
+        raise SystemExit(f"{len(unsplittable)} training unit(s) have too few measured positions to be split into training and development "
+                         f"contexts: {shown}. A unit needs at least two. Leave them out of --assay / --assays-file and submit again "
+                         "(that is a new campaign).")
+    thin = [u for u, (train, _) in split.items() if train < MIN_TRAIN_CONTEXTS]
+    if thin:
+        shown = ", ".join(f"{u} ({split[u][0]} training, {split[u][1]} development)" for u in thin[:5]) + (f" (+{len(thin) - 5} more)" if len(thin) > 5 else "")
+        print(f"note: {len(thin)} unit(s) train on fewer than {MIN_TRAIN_CONTEXTS} contexts, so a few positions decide the student and its "
+              f"checkpoint: {shown}", flush=True)
 
 
 def run(c: Campaign, task: dict) -> None:
@@ -39,7 +70,7 @@ def run(c: Campaign, task: dict) -> None:
     # This is a CPU job: weights that were never fetched, or were purged, fail here minutes after submission instead of in
     # the GPU queue hours later. MPD_ALLOW_HUB=1 (login node or laptop only) lets `models.resolve` use the Hub id instead.
     if os.environ.get("MPD_ALLOW_HUB") != "1":
-        models.require_ready(models.needed(spec), c.home, cluster=c.resolved.get("cluster"), explicit_home=True)
+        models.require_ready(models.needed(spec), c.home, cluster=_fetch_cluster(c), explicit_home=True)
     train_bm = c.benchmark(spec.train_data)
     known = {a.assay_id for a in train_bm.assays()}
     missing = [a for a in spec.assays if a not in known]
@@ -52,6 +83,8 @@ def run(c: Campaign, task: dict) -> None:
     for unit in c.units:
         ids = sorted(known) if unit == "all" else [unit]
         tables[unit] = build_table(train_bm, ids, with_variants=not dense, dense=dense)
+    split = unit_split(c, tables)
+    check_split(split)
     parent = union(list(tables.values()))
     parent.save(c.stem_union())
     for unit, table in tables.items():
@@ -77,6 +110,7 @@ def run(c: Campaign, task: dict) -> None:
         "union_contexts": len(parent), "union_digest": parent.digest(),
         "unit_contexts": {u: len(t) for u, t in tables.items()},
         "unit_variants": {u: (None if t.var_mt is None else int(len(t.var_mt))) for u, t in tables.items()},
+        "unit_split": split, "dev_fraction": c.resolved["dev_fraction"],
         "eval": eval_info, "dms_labels_opened": False,
     }
     if structures is not None:
@@ -84,6 +118,9 @@ def run(c: Campaign, task: dict) -> None:
     write_json(c.root / "contexts" / "MANIFEST.json", manifest)
     print(f"prepared {len(parent)} training contexts for {len(tables)} unit(s); "
           f"eval contexts: { {d: i['contexts'] for d, i in eval_info.items()} }", flush=True)
+    dev_total, all_total = sum(d for _, d in split.values()), sum(t + d for t, d in split.values())
+    print(f"development split: {dev_total} of {all_total} contexts ({dev_total / max(1, all_total):.1%}); --dev-fraction {c.resolved['dev_fraction']:g} "
+          "is the target, and every sequence keeps at least one training context and holds out at least min(5, n-1) development contexts", flush=True)
     if structures is not None:
         print(f"structures: {len(structures)} sequences, {structures.masked_fraction():.1%} of residues masked, "
               f"digest {structures.digest()[:12]}", flush=True)

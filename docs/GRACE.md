@@ -90,7 +90,7 @@ download size is an estimate; the others are the pinned manifests and a real fet
 
 | what | download | on disk | files |
 |---|---|---|---|
-| Python environment (`$MPD_HOME/env`): torch 2.10 with CUDA 12.8 libraries, transformers, peft | 3 to 4 GB, cached in `cache/pip` | 7.7 GB | about 28,000 |
+| Python environment (`$MPD_HOME/env`): torch 2.10 with CUDA 12.8 libraries, transformers, peft | about 4 GB, cached in `cache/pip` | 7.7 GB | about 28,000 |
 | ESM2-3B and ESM2-650M weights (all five ESM2 models: 14.74 GB; all seven models: 17.48 GB) | 13.98 GB | 13.98 GB | 12 |
 | ProteinGym v1.3 | 62.4 MB | 1.2 GB | 421 |
 | VenusMutHub | 6.3 MB | 6.3 MB | 797 |
@@ -148,7 +148,7 @@ torch):
    loaded **[earlier jobs]**; which Python it provides today is **[NOT VERIFIED]**. If it is missing the script says so and points at
    `module spider Python`. HPRC's own examples use `GCCcore/13.2.0 Python/3.11.5` **[HPRC]** (deck 2026-01, slide 40; never run
    here): `bash scripts/setup_env.sh --cluster grace --modules "GCCcore/13.2.0 Python/3.11.5"`;
-3. needs Python 3.11 or newer, then creates the venv `$MPD_HOME/env`;
+3. needs Python 3.11 or newer (3.11, 3.12 and 3.13 are the tested ones; a newer one only gets a warning), then creates the venv `$MPD_HOME/env`;
 4. runs `pip install -c constraints/grace.txt` for `mpd` with the training extra. The pinned set is torch 2.10.0, transformers
    4.51.0 and peft 0.13.2, the combination the test suite ran with on CPU. `--constraints none` installs the looser ranges of
    `pyproject.toml`, which is **not** the tested set;
@@ -156,15 +156,16 @@ torch):
    same modules, so there is no profile to edit **[CPU]**;
 6. adds `MPD_HOME` and `MPD_CLUSTER` to `env/bin/activate` (so `source .../activate` is all a new shell needs), and runs `mpd doctor`.
 
-pip's cache and `TMPDIR` are under `$MPD_HOME/cache`; nothing is written under `$HOME`. The wheels are 3 to 4 GB to download (a pip dry run
-for a newer torch counted 3 GB; resolving the pinned set for the CI checks put about 4 GB of wheels into a pip cache; neither was timed on Grace) and the result is about 28,000 files and 7.7 GB
+pip's cache and `TMPDIR` are under `$MPD_HOME/cache`; nothing is written under `$HOME`. The wheels are about 4 GB to download (installing the pinned set
+filled a pip cache with 4.0 GB of wheels; the download was not timed on Grace) and the result is about 28,000 files and 7.7 GB
 (measured on the reference environment with the same package versions). If the login node ends the script after its hour, run it
 again: the wheels are cached and it continues.
 
 Other options: `--home DIR` (then `source DIR/env/bin/activate`), `--python PATH`, `--modules none`, `--no-torch` (planner only, for a machine that runs no job), `--dev`
 (editable install with the test extra, for working on `mpd`), `--rebuild`, `--yes`. `bash scripts/setup_env.sh --help` lists them.
 
-**After `git pull`**, run the script again. A normal install is a snapshot taken from a copy of the sources, so pulling never changes
+**After `git pull`**, run the script again, but only when no job of a campaign is queued or running (`mpd status` shows it): the script installs
+the new `mpd` into the environment those jobs execute. A normal install is a snapshot taken from a copy of the sources, so pulling alone never changes
 the code under a running campaign; `mpd doctor` warns when the installed `mpd` or `constraints/grace.txt` differs from what the
 environment was built with **[CPU]**. A campaign directory is also fixed once it has been submitted: if a newer `mpd` would plan a different
 recipe for the same campaign id, it refuses to mix the two ([below](#a-different-recipe-is-refused)).
@@ -561,8 +562,9 @@ been measured **[NOT VERIFIED]**.
 
 **Training uses one GPU by default.** DDP with NCCL has never run on a real GPU, a two-GPU request takes a whole node (48 cores,
 360 GB), and one GPU costs about the same SUs for twice the time **[NOT VERIFIED]** for the two-GPU request. `--train-gpus 2` gives the
-DDP shape (tested on CPU with gloo: two processes equal one **[CPU]**); more GPUs than a node holds is an error rather than a silent
-clamp **[CPU]**.
+DDP shape (tested on CPU with gloo: two processes equal one for the `direct-*` methods **[CPU]**; for `score-*` the loss is the average over
+micro-batches of the per-micro-batch average over variants, so the 1-GPU and 2-GPU runs follow slightly different paths, see
+[the note below](#micro-batch-and-the-score-loss)); more GPUs than a node holds is an error rather than a silent clamp **[CPU]**.
 
 ### Partitions and the walltime trap
 
@@ -631,6 +633,14 @@ Memory: weights, plus estimated activations (counted from the saved tensors on t
 must fit 85% of the card. `mpd` trains at micro-batch 2 when that fits and at 1 otherwise, keeping the global batch of 64 through more
 accumulation steps: on a 40 GB A100 the `esm2-3b` student trains at micro-batch 1 **[CPU]**. If the first job runs out of memory, use a
 larger GPU (`--gpu a40` has 48 GB) or a smaller student; more GPUs do not help, because every GPU holds a full copy **[NOT VERIFIED]**.
+
+#### Micro-batch and the score loss
+
+The global batch stays 64 whatever the micro-batch. For `direct-*` methods that makes a run independent of the micro-batch and of the number of
+GPUs. For `score-*` methods the loss of an update is the average of the loss of each micro-batch, and the loss of a micro-batch is the average
+over the variants it holds. A position with few measured variants therefore weighs more at micro-batch 1 than at micro-batch 2 (measured on
+the ProteinGym score table: contexts with at most five variants carry 9.4% of the loss at micro-batch 1 and 4.1% at micro-batch 2). Compare
+`score-*` results across students or GPU types with that in mind; the `esm2-3b` student on a 40 GB A100 trains at micro-batch 1, the others at 2.
 
 ### The job script
 
@@ -749,7 +759,7 @@ total, which includes the GPUs. Budget with the plan's number. `maxconfig -f <sc
   train 10:15:00, score 00:30:00; **[HPRC]** for the allocation). With `esm2-3b` as the student (teacher `esm2-650m`) the plan is 4,983 SU, 25%, with 1-16:00:00 of training at
   micro-batch 1 (**simulated**).
 - `*-one` methods train one student per assay, so the training line is multiplied by the number of assays: `score-one` over all 217
-  ProteinGym assays plans to **184,700 SU**, about nine times the Basic allocation (**simulated**). `mpd submit` refuses a plan above
+  ProteinGym assays, evaluated on ProteinGym only, plans to **184,700 SU**, about nine times the Basic allocation (**simulated**). `mpd submit` refuses a plan above
   `--max-su` (default 10,000) and says why; `plan` and `--dry-run` only warn. Use `*-one` for a few assays.
 - Changing only `--eval-data`, `--gpu`, `--train-gpus`, `--cluster`, `--score-shards`, `MPD_DTYPE` or `MPD_TF32` makes a **new campaign**, which
   retrains. Walltime overrides, `--array-throttle`, `--sbatch-arg`, `--module`, other `--env` pairs, `--account`, `--home` and `--python` do not

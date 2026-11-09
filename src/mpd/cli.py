@@ -175,6 +175,8 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("stage", nargs="?", help="stage name, e.g. train or score-base (default: list the logs)")
     p.add_argument("--err", action="store_true", help="show the error log (.err) instead of the output log (.out)")
     p.add_argument("--tail", type=_positive_int, default=50, metavar="N", help="last N lines (default 50)")
+    p.add_argument("--raw", action="store_true",
+                   help="print the file as written; by default account numbers, e-mail addresses and your user name are hidden so the text can be pasted into an issue")
     where(p)
     p = add("cancel", cmd_cancel, "cancel the queued and running jobs of a campaign")
     p.add_argument("campaign", help="campaign directory, id or unique id prefix")
@@ -241,14 +243,15 @@ def _home(cluster: Cluster, override: str | None) -> Path:
 
 
 def _optional_home(cluster: Cluster | None, override: str | None) -> Path | None:
-    """The working root if it is known; a profile that cannot name one ($SCRATCH unset) gives None unless --home was given."""
+    """The working root if it is known. A root somebody named (--home or $MPD_HOME) that the profile refuses raises its message;
+    a profile that cannot name one itself ($SCRATCH unset) gives None."""
     raw = override or os.environ.get("MPD_HOME")
     if cluster is None:
         return _absolute(raw) if raw else None
     try:
         return _home(cluster, override)
     except ClusterError:
-        if override:
+        if raw:
             raise
         return None
 
@@ -340,6 +343,12 @@ def _already_submitted(name: str, state) -> str:
         return (f"campaign {name} was only partly submitted (queued: {queued}). Nothing was written.\n"
                 f"  mpd status {name}    see what is queued\n  mpd cancel {name}    cancel it\n"
                 f"  add --force to this command to continue the chain: the stages not yet queued are submitted\n{applies}")
+    if state.state == "submitting":                          # mpd submit was cut off (ssh dropped, shell killed): the marker never got past this
+        return (f"a submission of {name} started {state.submitted_at or 'earlier'} and did not finish (jobs queued so far: {queued}). "
+                "Nothing was written.\n"
+                "  If it is still running in another terminal, wait for it. If your ssh connection dropped or the terminal closed, it was cut off.\n"
+                f"  mpd status {name}    see what is queued\n  mpd cancel {name}    cancel it\n"
+                f"  add --force to this command to finish it: the stages not yet queued are submitted and the others are kept\n{applies}")
     return (f"campaign {name} was already submitted (jobs: {queued}). Nothing was written.\n"
             f"  mpd status {name}    follow it\n"
             f"  mpd cancel {name}    stop its queued and running jobs; after that the same command submits it again (finished stages are kept)\n"
@@ -384,8 +393,15 @@ def cmd_submit(args) -> int:
         if not sys.stdin.isatty():
             print("refusing to submit without --yes in a non-interactive shell", file=sys.stderr)
             return 2
-        if input(f"\nSubmit {len(scripts)} job(s), up to {plan.total_su:,.0f} SU? [y/N] ").strip().lower() != "y":
-            print(f"not submitted (the scripts stay in {plan.campaign_dir / 'scripts'})")
+        try:
+            answer = input(f"\nSubmit {len(scripts)} job(s), up to {plan.total_su:,.0f} SU? [y/N] ").strip().lower()
+        except EOFError:                                           # Ctrl-D, or the terminal went away: the prompt line is still open
+            print()
+            answer = None
+        if answer not in ("y", "yes"):
+            why = "no answer was given" if answer is None else "the answer was not y or yes"
+            print(f"not submitted: {why}. The scripts stay in {plan.campaign_dir / 'scripts'}. "
+                  "Run the same command to be asked again.")
             return 1
     submit(plan, scripts, force=args.force)                        # prints what was queued and the follow-up commands
     if _ref(plan.campaign_dir, opts.home) != plan.campaign_dir.name:
@@ -442,6 +458,11 @@ def _advice_block(said: list[str]) -> list[str]:
 def _next_steps(ref: str, state: str, failed: str | None, states: dict, jobs: dict, have_results: bool) -> list[str]:
     if state == "partial":
         return [f"mpd cancel {ref}    cancel the jobs that were queued", "repeat your mpd submit command with --force to continue the chain"]
+    if state == "submitting":                                # an mpd submit that is still running, or was cut off before it queued every stage
+        return ["an mpd submit of this campaign has not finished: the stages missing from the table are not queued yet",
+                "if it is not still running in another terminal (a dropped ssh connection stops it), repeat your mpd submit command with "
+                "--force to queue them; the stages already queued are kept",
+                f"mpd cancel {ref}    cancel the jobs that were queued"]
     if state == "cancelled":
         return ["this campaign was cancelled: repeat your mpd submit command, with any option you want to change, to queue it again; stages that already finished are kept"]
     if state == "failed":
@@ -605,7 +626,10 @@ def cmd_logs(args) -> int:
     job, task, _, target = mine[-1]
     print(f"==> {target} (job {job}" + (f", task {task}; {len(mine) - 1} other task log(s) in the same folder" if len(mine) > 1 else "") + ") <==")
     with open(target, errors="replace") as fh:
-        sys.stdout.write("".join(deque(fh, maxlen=args.tail)))
+        text = "".join(deque(fh, maxlen=args.tail))
+    if not args.raw:
+        text = _campaigns().scrub_log(path, text)
+    sys.stdout.write(text)
     return 0
 
 

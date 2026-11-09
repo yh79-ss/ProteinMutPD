@@ -157,11 +157,12 @@ class Cluster:
             known = ", ".join(available_clusters())
             if not re.fullmatch(r"[A-Za-z0-9_-]+", arg):
                 raise ClusterError(f"unknown cluster {arg!r}; use one of {known} or a path to a profile YAML")
+            name = arg.lower()                  # Grace and GRACE are grace; the spelling of a path to a profile file is kept
             try:
-                text = resources.files("mpd.clusters").joinpath(f"{arg}.yaml").read_text(encoding="utf-8")
+                text = resources.files("mpd.clusters").joinpath(f"{name}.yaml").read_text(encoding="utf-8")
             except FileNotFoundError:
                 raise ClusterError(f"unknown cluster {arg!r}; use one of {known} or a path to a profile YAML") from None
-            source = f"{arg}.yaml"
+            source = f"{name}.yaml"
         try:
             data = yaml.safe_load(text)
         except yaml.YAMLError as exc:

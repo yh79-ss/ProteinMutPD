@@ -2,9 +2,13 @@
 
 ProteinMutPD is alpha research software that runs on a cluster login node, writes job scripts and submits them with your
 account. It downloads data, model weights and, for SaProt, one Foldseek release archive from public hosts and checks each
-against a pinned checksum; the Foldseek binary that `mpd fetch foldseek` installs is run only after its own checksum
+against a pinned checksum (the VenusMutHub structure deposit, which has no published record yet, is checked against the `SHA256SUMS` of the copy you give it, and a file name in it that leaves the download folder is refused); the Foldseek binary that `mpd fetch foldseek` installs is run only after its own checksum
 matches (a binary you name with `MPD_FOLDSEEK` is yours to trust). `scripts/setup_env.sh` installs Python packages from PyPI
-at the versions pinned in `constraints/` (versions, not hashes).
+at the versions pinned in `constraints/` (versions, not hashes). Published advisories exist for the pinned `transformers`, `torch` and
+`accelerate` versions (PyPI and OSV, checked 2026-11-09); several have no fix inside the supported ranges. The jobs are offline, `mpd` loads only
+local weight folders whose files match a sha256 manifest, never sets `trust_remote_code`, and calls `torch.load` with `weights_only`. A folder
+you name with `MPD_MODEL_<KEY>` or `MPD_MODELS_DIR` is not checked against the manifest, so treat it as trusted input. Dependabot covers
+GitHub Actions only; the pins are bumped by hand.
 
 ## Reporting a vulnerability
 

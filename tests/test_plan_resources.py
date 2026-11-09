@@ -589,12 +589,13 @@ def test_walltime_options_explain_themselves(flag, value, message):
 @pytest.mark.parametrize("kw,message", [
     (dict(peak_lr=0.0), "--lr must be positive"), (dict(peak_lr=-1e-5), "--lr must be positive"),
     (dict(peak_lr=float("nan")), "--lr must be a finite"), (dict(peak_lr=float("inf")), "--lr must be a finite"),
-    (dict(kl_weight=-1.0), "--kl-weight must be zero or positive"), (dict(kl_weight=float("nan")), "--kl-weight must be a finite"),
+    (dict(method="direct-all", kl_weight=-1.0), "--kl-weight must be zero or positive"),      # --kl-weight is refused for the score methods
+    (dict(method="direct-all", kl_weight=float("nan")), "--kl-weight must be a finite"),
 ])
 def test_recipe_numbers_are_validated(kw, message):
     with pytest.raises(PlanError, match=message):
         make("grace", spec_kw=kw)
-    assert make("grace", spec_kw=dict(peak_lr=1e-4, kl_weight=0.0)).resolved["peak_lr"] == 1e-4
+    assert make("grace", spec_kw=dict(peak_lr=1e-4, kl_weight=0.0, method="direct-all")).resolved["peak_lr"] == 1e-4
     assert make("grace", spec_kw=dict(kl_weight=0.0, method="direct-all")).resolved["kl_weight"] == 0.0     # zero is a value, not "unset"
 
 

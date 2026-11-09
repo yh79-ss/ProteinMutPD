@@ -812,6 +812,38 @@ def test_fetch_waits_out_rate_limits_and_explains_a_dead_server(tmp_path, monkey
     assert "--from-dir" not in str(err.value)                                  # `mpd fetch foldseek` has no such option
 
 
+def test_a_foldseek_body_that_ends_before_its_content_length_is_retried(tmp_path, monkeypatch):
+    """http.client returns a short body as if it were complete; the size announced by the server must decide."""
+    sleeps, calls = [], []
+    monkeypatch.setattr(tools, "time", type("T", (), {"sleep": staticmethod(sleeps.append)}))
+
+    class Short:
+        headers = {"Content-Length": "1000"}
+        chunked = False
+
+        def __init__(self):
+            self.sent = False
+
+        def read(self, n=-1):
+            if self.sent:
+                return b""
+            self.sent = True
+            return b"x" * 400
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(tools.urllib.request, "urlopen", lambda *a, **k: calls.append(1) or Short())
+    with pytest.raises(FetchError, match=r"the server ended the body after 400 of 1000 bytes.*--from-file <archive>") as err:
+        tools._download("https://example.invalid/foldseek.tar.gz", tmp_path / "foldseek.tar.gz", lambda m: None)
+    assert len(calls) == tools.RETRIES and len(sleeps) == tools.RETRIES - 1
+    assert not list(tmp_path.glob("*.part")) and not (tmp_path / "foldseek.tar.gz").exists()          # nothing half-written is promoted
+    assert "size 400" not in str(err.value)                                                           # not the late size-mismatch message
+
+
 def test_the_foldseek_pin_is_well_formed():
     pin = sources.FOLDSEEK
     assert pin.url.startswith("https://github.com/steineggerlab/foldseek/releases/download/10-941cd33/")

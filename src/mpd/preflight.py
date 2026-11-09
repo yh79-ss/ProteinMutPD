@@ -7,6 +7,7 @@ assay ids and cost; weights, structures and `sbatch --test-only` come from the m
 
 from __future__ import annotations
 
+import csv
 import difflib
 import getpass
 import hashlib
@@ -19,7 +20,7 @@ import re
 import shlex
 import shutil
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from . import __version__, envrecord
@@ -351,6 +352,28 @@ def _data_dir(dataset: str, home: Path) -> Path:
     return Path(home) / "data" / _DATA[dataset][1]
 
 
+def _cut_off(root: Path) -> tuple[str, int, int, str] | None:
+    """(kind, files lacking, files named, the first lacking) for a ProteinGym folder without FETCHED.json, or None if it is whole.
+
+    `mpd fetch` unpacks the assay zip, then the structure zip, and writes FETCHED.json last, so a fetch that was cut off
+    leaves some of the files that the reference table names out."""
+    try:
+        with open(root / "DMS_substitutions.csv", newline="", encoding="utf-8") as fh:
+            rows = list(csv.DictReader(fh))
+    except (OSError, UnicodeDecodeError, csv.Error):
+        return None
+    folders = [("assay", root / "DMS_ProteinGym_substitutions", "DMS_filename")]
+    if (root / "ProteinGym_AF2_structures").is_dir():          # no folder: never unpacked, which only SaProt minds
+        folders.append(("structure", root / "ProteinGym_AF2_structures", "pdb_file"))
+    for kind, folder, column in folders:
+        names = sorted({(r.get(column) or "").strip() for r in rows} - {""})
+        names = [n for n in names if "|" not in n]             # several files in one entry: the reader gives it no structure
+        gone = [n for n in names if not (folder / n).is_file()]
+        if gone:
+            return kind, len(gone), len(names), gone[0]
+    return None
+
+
 def check_dataset(dataset: str, ctx, required: bool = True) -> Check:
     title, _, needed = _DATA[dataset]
     root = _data_dir(dataset, Path(ctx.home))
@@ -367,6 +390,12 @@ def check_dataset(dataset: str, ctx, required: bool = True) -> Check:
             return missing
         return Check(f"data:{dataset}", "warn", f"{root} has {have} files but no FETCHED.json, so the fetch may have "
                                                 "been interrupted (it resumes)", fix)
+    cut = _cut_off(root)
+    if cut:
+        kind, lacking, named, example = cut
+        return Check(f"data:{dataset}", "error",
+                     f"{title} data is incomplete under {root}. It lacks {lacking} of {named} {kind} files, such as {example}. "
+                     f"The fetch was probably cut off. Run it again on a login node: {fix}", fix)
     return Check(f"data:{dataset}", "ok", f"{root} (no FETCHED.json: not fetched by `mpd fetch`, so not hash-checked)")
 
 
@@ -576,7 +605,7 @@ def render(checks: list[Check], *, mode: str = "plan") -> str:
 # ---------------------------------------------------------------- paste-safe report
 _TOKENS = re.compile(r"\b(?:hf_[A-Za-z0-9]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|git" r"hub_pat_[A-Za-z0-9_]{20,})\b")   # Hugging Face, GitHub
 _EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
-_LONG_NUMBER = re.compile(r"(?<![\w.])\d{10,14}(?![\w.])")
+_LONG_NUMBER = re.compile(r"(?<![\w.])\d{10,14}(?!\d)")
 _USER_DIR = re.compile(r"(/(?:scratch/(?:user|group|project)|home|work|users?)/)[^/\s:'\"]+")
 
 
@@ -600,7 +629,7 @@ def scrub(text: str, *, accounts=(), users=(), paths=()) -> str:
     except Exception:                                         # no passwd entry in some containers
         pass
     for name in sorted((n for n in names if n and len(n) > 2), key=len, reverse=True):
-        text = re.sub(rf"(?<![\w.-]){re.escape(name)}(?![\w-])", "<netid>", text)
+        text = re.sub(rf"(?<![A-Za-z0-9]){re.escape(name)}(?![A-Za-z0-9])", "<netid>", text)
     return _LONG_NUMBER.sub("<account>", text)
 
 
@@ -610,6 +639,7 @@ def report(checks: list[Check], opts, *, mode: str = "doctor") -> str:
     head = [f"mpd {__version__} doctor report",
             f"python {platform.python_version()} on {platform.system()} {platform.release()}",
             f"cluster {getattr(cluster, 'name', None) or 'none given'}"]
-    text = "\n".join(head) + "\n\n" + render(checks, mode=mode)
+    safe = [replace(c, message=c.message.split("\n")[0]) if c.name == "quota" else c for c in checks]      # the raw showquota lines stay on your screen
+    text = "\n".join(head) + "\n\n" + render(safe, mode=mode)
     account = getattr(opts, "account", None) or os.environ.get("MPD_ACCOUNT")
     return scrub(text, accounts=[account], paths=[(Path(opts.home), "<mpd-home>")])

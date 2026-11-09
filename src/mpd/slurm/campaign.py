@@ -303,6 +303,11 @@ def _accounts_in_scripts(root: Path) -> tuple[str, ...]:
     return tuple(found)
 
 
+def scrub_log(campaign_dir, text: str) -> str:
+    """`scrub`, also hiding the account written in the campaign's own job scripts."""
+    return scrub(text, _accounts_in_scripts(Path(campaign_dir)))
+
+
 # ---------------------------------------------------------------- Slurm states
 @dataclass
 class JobState:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import shlex
 
-from .cluster import format_walltime
+from .cluster import available_clusters, format_walltime
 from .plan import (Plan, PlanError, Stage, check_slurm_path, job_env, validate_account, validate_module,
                    validate_sbatch_flag)
 
@@ -77,8 +77,10 @@ def render_script(plan: Plan, stage: Stage) -> str:
 
     cache = opts.home / "cache"
     planner_env, user_env = job_env(opts)
+    # A job turns MPD_CLUSTER into the `--cluster NAME` of the fetch command it prints; `mpd fetch` knows only the packaged names.
+    cluster_var = f" MPD_CLUSTER={_quote(cluster.name)}" if cluster.name in available_clusters() else ""
     body += [
-        f"export MPD_HOME={_quote(opts.home)} MPD_CLUSTER={_quote(cluster.name)} HF_HOME={_quote(opts.home / 'hf_cache')} "
+        f"export MPD_HOME={_quote(opts.home)}{cluster_var} HF_HOME={_quote(opts.home / 'hf_cache')} "
         f"XDG_CACHE_HOME={_quote(cache)} "
         f"TORCH_HOME={_quote(cache / 'torch')} TRITON_CACHE_DIR={_quote(cache / 'triton')} MPLCONFIGDIR={_quote(cache / 'mpl')}",
         # weights are staged by `mpd fetch` and compute nodes have no internet

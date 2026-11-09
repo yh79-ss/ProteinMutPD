@@ -63,7 +63,8 @@ Two variables change where `mpd` looks:
 - `MPD_MODELS_DIR=/shared/models` replaces `<home>/models`, so a lab can keep one read-only copy for everyone.
 - `MPD_MODEL_ESM2_650M=/path/to/folder` (the key in capitals, `-` as `_`) uses that folder for one model, whatever
   `<home>/models` holds. It must contain `config.json` and the files `from_pretrained` needs; `mpd` does not check them
-  against the pin, so the result is your responsibility. This is for weights you already have under another name.
+  against the pin, so the result is your responsibility: treat such a folder as trusted input, and prefer a copy made by `mpd fetch model`.
+  This is for weights you already have under another name.
 
 `MPD_ALLOW_HUB=1` lets a login node or laptop load a model by its Hugging Face id (at the pinned commit) when no local
 copy exists. Jobs never get it: a missing folder in a job is an error, not a download.

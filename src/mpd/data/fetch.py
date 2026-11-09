@@ -100,6 +100,15 @@ def _disk_full_error(path: Path) -> DownloadError:
                          "and keep --home on $SCRATCH)")
 
 
+def _announced_length(resp) -> int | None:
+    """The body length the server announced in Content-Length, or None when it gave none (or sent the body in chunks)."""
+    headers = getattr(resp, "headers", None)
+    if headers is None or getattr(resp, "chunked", False):    # http.client already raises when a chunked body ends early
+        return None
+    value = str(headers.get("Content-Length") or "").strip()
+    return int(value) if value.isdigit() else None
+
+
 def _check_deadline(deadline: float | None) -> None:
     if deadline is not None and time.monotonic() >= deadline:
         raise TimeBudgetReached("stopped at the time limit; partial downloads are kept")
@@ -144,6 +153,9 @@ def _download(url: str, target: Path, *, retries: int = 3, timeout: int = 60,
         try:
             with urllib.request.urlopen(_request(url), timeout=timeout) as resp, open(part, "wb") as out:
                 shutil.copyfileobj(resp, out, CHUNK)
+                got, promised = out.tell(), _announced_length(resp)
+            if promised is not None and got < promised:           # http.client hands back a body that ended early as if complete
+                raise ConnectionError(f"the server ended the body after {got} of {promised} bytes")
             part.replace(target)
             return
         except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:

@@ -8,7 +8,7 @@
 # jobs and HPRC documents, not from a run of this script there. Everything else is tested with fake tools (tests/test_setup_script.py).
 
 if [ -z "${BASH_VERSION:-}" ]; then
-  echo "setup: error: run this script with bash:  bash scripts/setup_env.sh --help" >&2
+  echo "setup: error: run this script with bash:  bash scripts/setup_env.sh --cluster grace" >&2
   exit 2
 fi
 # No `set -u` yet: /etc/bashrc and the module scripts on Grace fail under it. It is switched on after the modules are loaded.
@@ -118,6 +118,10 @@ normalize() {                 # collapse //, /./ and /../ without touching the f
 
 # ---------------------------------------------------------------- cluster defaults, home, modules, constraints
 [ -n "$cluster" ] || refuse "give --cluster NAME (grace, vision, or your own profile) or set MPD_CLUSTER: the environment record names it"
+case $cluster in            # Grace and GRACE mean grace, as they do for mpd; a path to a profile file keeps its spelling
+  */*|*.yaml|*.yml) ;;
+  *) cluster=$(printf '%s' "$cluster" | LC_ALL=C tr '[:upper:]' '[:lower:]') ;;
+esac
 default_modules=
 default_home=
 no_home_under=
@@ -182,6 +186,7 @@ if [ -n "$modules" ]; then
     loaded "$m" || fail "module $m did not load. On Grace look for a Python module with:  module spider Python  (or: module spider Anaconda3)
   then pass it:  bash scripts/setup_env.sh --cluster $cluster --modules \"<module names>\"
   or use a Python you already have:  --modules none --python /path/to/python3
+  Use Python 3.11, 3.12 or 3.13: newer versions were not tested.
   (the Grace default is the module earlier jobs loaded; this script has not been run on Grace)"
   done
   set +f
@@ -199,6 +204,10 @@ py_version=$("$python" -c 'import sys; print(".".join(map(str, sys.version_info[
 case $py_version in
   [0-2].*|3.[0-9].*|3.10.*) fail "$python is Python $py_version; mpd needs 3.11 or newer. Load a newer Python module (module spider Python) or pass --python" ;;
 esac
+py_minor=${py_version#*.}; py_minor=${py_minor%%.*}
+if [ "${py_version%%.*}" -gt 3 ] || [ "$py_minor" -gt 13 ]; then       # constraints/grace.txt: tested on 3.11, 3.12 and 3.13
+  warn "$python is Python $py_version, which is newer than the Python 3.13 that mpd was tested with. It may work. If the install or a job fails, build again with Python 3.11, 3.12 or 3.13 (--modules or --python)"
+fi
 "$python" -c 'import venv, ensurepip' >/dev/null 2>&1 || fail "$python has no venv or ensurepip module (some distributions package them separately). Use another Python"
 say "python $py_version ($python)"
 
